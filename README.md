@@ -8,7 +8,6 @@ VIDEO_WIDTH=1920
 VIDEO_HEIGHT=1080
 VIDEO_CODEC=libx264
 
-# Use the correct JSON format (as you did, which is good!)
 TEXT_REGULAR_COLOR="[170, 170, 170, 255]"
 TEXT_BOLD_COLOR="[0, 0, 0, 255]"
 
