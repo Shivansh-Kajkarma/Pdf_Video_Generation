@@ -37,14 +37,12 @@ class FrameGeneratorV11:
 
         # --- 1. Load settings from config.py ---
         self.font_size = max(40, int(self.bg_height / 6))
-        self.line_height = int(self.font_size * 1.25)
+        self.line_height = int(self.font_size * 1.15)
         self.regular_font, self.bold_font = self._load_fonts(self.font_size)
         self.max_text_width = int(self.bg_width * 0.90)
-        self.min_words_per_slide = 8
+        # self.min_words_per_slide = 8
         
-        self.slides, self.slide_layouts, self.slide_start_times = self._build_grouped_slides(
-            self.min_words_per_slide
-        )
+        self.slides, self.slide_layouts, self.slide_start_times = self._build_grouped_slides()
         logger.info(f"FrameGeneratorV11 initialized: {len(self.segments)} segments grouped into {len(self.slides)} slides.")
 
     def _load_fonts(self, size: int) -> Tuple[ImageFont.FreeTypeFont, ImageFont.FreeTypeFont]:
@@ -81,46 +79,86 @@ class FrameGeneratorV11:
         segment_end = self.segments[segment_index + 1]["start"] if segment_index + 1 < len(self.segments) else float('inf')
         return [w for w in self.all_words if w.start >= segment_start and w.start < segment_end]
 
-    def _build_grouped_slides(self, min_words_per_slide: int) -> Tuple[List[List[List[WordTimestamp]]], Dict[int, Dict[int, Tuple[int, int]]], List[float]]:
-        logger.info(f"Building grouped slides (min_words={min_words_per_slide})...")
+    def _build_grouped_slides(self) -> Tuple[List[List[List[WordTimestamp]]], Dict[int, Dict[int, Tuple[int, int]]], List[float]]:
+        logger.info("Building grouped slides (Max Words strategy)...")
         slides, layouts, slide_start_times = [], {}, []
         dummy_img = Image.new("RGB", (self.bg_width, self.bg_height))
         draw = ImageDraw.Draw(dummy_img)
         space_bbox = draw.textbbox((0, 0), " ", font=self.bold_font); space_width = space_bbox[2] - space_bbox[0]
+
+        MAX_WORDS_PER_SLIDE = 10
+
         current_slide_words_ts, current_slide_start_time, current_slide_segments = [], -1, []
+
+        def build_slide_layout(words_ts, segments_list, start_time):
+            """Helper function to avoid repeating the build logic."""
+            if not words_ts:
+                return
+
+            slide_index = len(slides)
+            all_clean_words = [word for s in segments_list for word in s["text"].strip().split()]
+            if len(all_clean_words) == len(words_ts):
+                for j in range(len(all_clean_words)):
+                    words_ts[j].word = all_clean_words[j]
+
+            current_slide_lines, current_line = [], []
+            for word in words_ts:
+                word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font); word_width = word_bbox[2] - word_bbox[0]
+                line_bbox = draw.textbbox((0, 0), " ".join(w.word for w in current_line), font=self.bold_font); line_width = line_bbox[2] - line_bbox[0]
+                if line_width + word_width + space_width > self.max_text_width and current_line:
+                    current_slide_lines.append(current_line); current_line = [word]
+                else:
+                    current_line.append(word)
+            if current_line: current_slide_lines.append(current_line)
+
+            slides.append(current_slide_lines); layouts[slide_index] = {}
+            total_text_height = len(current_slide_lines) * self.line_height
+            
+            # If text is *still* too tall, warn about it.
+            # This can happen if one segment is just massive.
+            if total_text_height > self.bg_height * 0.95:
+                 logger.warning(f"Slide {slide_index} (starting {start_time}s) may be too tall! Has {len(current_slide_lines)} lines.")
+
+            start_y = (self.bg_height - total_text_height) // 2; current_y = start_y
+            for line_of_words in current_slide_lines:
+                current_x = int(self.bg_width * 0.05)
+                for word in line_of_words:
+                    layouts[slide_index][id(word)] = (current_x, current_y)
+                    word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font); word_width = word_bbox[2] - word_bbox[0]
+                    current_x += word_width + space_width
+                current_y += self.line_height
+            slide_start_times.append(start_time)
+
+        # main loop
         for i, segment in enumerate(self.segments):
             segment_words_ts = self._get_words_for_segment(i)
             if not segment_words_ts: continue
-            if not current_slide_words_ts: current_slide_start_time = segment["start"]
-            current_slide_words_ts.extend(segment_words_ts); current_slide_segments.append(segment)
-            if len(current_slide_words_ts) >= min_words_per_slide or i == len(self.segments) - 1:
-                if not current_slide_words_ts: continue
-                slide_index = len(slides)
-                all_clean_words = [word for s in current_slide_segments for word in s["text"].strip().split()]
-                if len(all_clean_words) == len(current_slide_words_ts):
-                    for j in range(len(all_clean_words)): current_slide_words_ts[j].word = all_clean_words[j]
-                current_slide_lines, current_line = [], []
-                for word in current_slide_words_ts:
-                    word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font); word_width = word_bbox[2] - word_bbox[0]
-                    line_bbox = draw.textbbox((0, 0), " ".join(w.word for w in current_line), font=self.bold_font); line_width = line_bbox[2] - line_bbox[0]
-                    if line_width + word_width + space_width > self.max_text_width and current_line:
-                        current_slide_lines.append(current_line); current_line = [word]
-                    else: current_line.append(word)
-                if current_line: current_slide_lines.append(current_line)
-                slides.append(current_slide_lines); layouts[slide_index] = {}
-                total_text_height = len(current_slide_lines) * self.line_height; start_y = (self.bg_height - total_text_height) // 2; current_y = start_y
-                for line_of_words in current_slide_lines:
-                    current_x = int(self.bg_width * 0.05)
-                    for word in line_of_words:
-                        layouts[slide_index][id(word)] = (current_x, current_y)
-                        word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font); word_width = word_bbox[2] - word_bbox[0]
-                        current_x += word_width + space_width
-                    current_y += self.line_height
-                slide_start_times.append(current_slide_start_time)
-                current_slide_words_ts, current_slide_start_time, current_slide_segments = [], -1, []
-        logger.info("Grouped slide building complete.")
+
+            # Check if adding this NEW segment will make the slide TOO BIG
+            if (len(current_slide_words_ts) + len(segment_words_ts) > MAX_WORDS_PER_SLIDE) and current_slide_words_ts:
+                
+                # 1. Build the PREVIOUS slide (it's full)
+                build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
+                
+                # 2. Reset and start the NEW slide with the current segment
+                current_slide_words_ts = segment_words_ts
+                current_slide_segments = [segment]
+                current_slide_start_time = segment["start"]
+            
+            else:
+                # --- It's not too big, so just add this segment to the current slide ---
+                if not current_slide_words_ts: 
+                    current_slide_start_time = segment["start"] # Set start time only for the first segment
+                current_slide_words_ts.extend(segment_words_ts)
+                current_slide_segments.append(segment)
+            ### ----------------- ###
+
+        # --- Handle the VERY LAST slide after the loop finishes ---
+        if current_slide_words_ts:
+            build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
+
+        logger.info(f"Grouped slide building complete. Created {len(slides)} slides.")
         return slides, layouts, slide_start_times
-    
     def make_frame_function(self, slide_index: int, slide_start_time: float):
         def generate_frame(t_local: float) -> np.ndarray:
             global_t = slide_start_time + t_local
