@@ -29,46 +29,92 @@ def master_audio(raw_audio_path: Path, processed_audio_path: Path) -> Path:
     """
     logger.info(f"Starting SOTA Audio Pipeline for {raw_audio_path.name}...")
     
-    denoised_path = raw_audio_path.parent / f"{raw_audio_path.stem}_denoised.mp3"
+    work_dir = raw_audio_path.parent
+    temp_wav_path = work_dir / f"{raw_audio_path.stem}_temp.wav"
+    static_reduced_wav = work_dir / f"{raw_audio_path.stem}_static.wav"
+    denoised_wav = work_dir / f"{raw_audio_path.stem}_denoised.wav"
+    mastered_wav = work_dir / f"{raw_audio_path.stem}_mastered.wav"
 
     try:
-        # --- Step 1: Denoise ---
-        logger.info("Step 1: Denoising audio...")
-        denoise_command = [
+        # --- Step 0: Convert to high-quality WAV for processing ---
+        logger.info("Step 0: Converting source audio to 48kHz WAV for processing...")
+        convert_to_wav = [
             "ffmpeg",
             "-i", str(raw_audio_path),
-            "-af", "anlmdn",
-            "-b:a", "320k",
+            "-ar", "48000",  # Upsample for cleaner processing
+            "-ac", "1",
             "-y",
-            str(denoised_path)
+            str(temp_wav_path)
         ]
-        _run_ffmpeg_command(denoise_command)
-        logger.info(f"Denoising complete. Saved to: {denoised_path}")
+        _run_ffmpeg_command(convert_to_wav)
 
-        # --- Step 2: Final Mastering ---
-        logger.info("Step 2: Applying final voice mastering...")
-        filter_chain = (
-            "highpass=f=90,lowpass=f=13500,"
-            "acompressor=threshold=-18dB:ratio=2.2:attack=10:release=200,"
-            "bass=g=3:f=150,treble=g=2:f=4000,"
-            "loudnorm=i=-18:tp=-2"
+        # --- Step 1: Static reduction + band limiting ---
+        logger.info("Step 1: Reducing broadband static and hum...")
+        static_filter = (
+            "highpass=f=90,"        # Remove very low rumble
+            "lowpass=f=16000,"      # Remove harsh highs
+            "afftdn=nf=-28"         # FFT-based denoiser for hiss/static
         )
-        
-        master_command = [
+        static_reduction_command = [
             "ffmpeg",
-            "-i", str(denoised_path),      # Input from Step 1
-            "-af", filter_chain,
-            "-ar", "48000",
-            "-ac", "2",
-            "-b:a", "256k",
+            "-i", str(temp_wav_path),
+            "-af", static_filter,
             "-y",
-            str(processed_audio_path) # Final output path
+            str(static_reduced_wav)
         ]
-        _run_ffmpeg_command(master_command)
+        _run_ffmpeg_command(static_reduction_command)
+
+        # --- Step 2: Fine denoise & smooth ---
+        logger.info("Step 2: Applying fine noise reduction...")
+        fine_denoise_filter = "anlmdn=s=0.00005"  # Non-linear median denoise (gentle)
+        fine_denoise_command = [
+            "ffmpeg",
+            "-i", str(static_reduced_wav),
+            "-af", fine_denoise_filter,
+            "-y",
+            str(denoised_wav)
+        ]
+        _run_ffmpeg_command(fine_denoise_command)
+
+        # --- Step 3: Mastering chain (de-esser, compressor, EQ, loudness) ---
+        logger.info("Step 3: Mastering with sibilance reduction, compressor, and loudness normalization...")
+        # Using high-shelf EQ to reduce sibilance instead of deesser (better compatibility)
+        mastering_filter = (
+            "highshelf=f=6000:width_type=h:width=2000:g=-2,"  # Reduce sibilance in 5-8kHz range
+            "acompressor=threshold=-20dB:ratio=1.8:attack=5:release=120,"
+            "bass=g=1.3:f=160,"
+            "treble=g=1.1:f=3500,"
+            "loudnorm=I=-16:TP=-1.5:LRA=10"
+        )
+        mastering_command = [
+            "ffmpeg",
+            "-i", str(denoised_wav),
+            "-af", mastering_filter,
+            "-ar", "44100",
+            "-ac", "1",
+            "-y",
+            str(mastered_wav)
+        ]
+        _run_ffmpeg_command(mastering_command)
+
+        # --- Step 4: Export back to high quality MP3 ---
+        logger.info("Step 4: Exporting mastered audio to MP3...")
+        export_command = [
+            "ffmpeg",
+            "-i", str(mastered_wav),
+            "-c:a", "libmp3lame",
+            "-b:a", "256k",
+            "-ar", "44100",
+            "-ac", "1",
+            "-y",
+            str(processed_audio_path)
+        ]
+        _run_ffmpeg_command(export_command)
         
         # --- Cleanup ---
-        if denoised_path.exists():
-            denoised_path.unlink()
+        for temp_file in [temp_wav_path, static_reduced_wav, denoised_wav, mastered_wav]:
+            if temp_file.exists():
+                temp_file.unlink()
             
         logger.info(f"Audio mastering complete! Final file: {processed_audio_path}")
         return processed_audio_path
@@ -76,8 +122,9 @@ def master_audio(raw_audio_path: Path, processed_audio_path: Path) -> Path:
     except Exception as e:
         logger.error(f"Audio pipeline failed: {e}", exc_info=True)
         # Clean up partial files on error
-        if denoised_path.exists():
-            denoised_path.unlink()
+        for temp_file in [temp_wav_path, static_reduced_wav, denoised_wav, mastered_wav]:
+            if temp_file.exists():
+                temp_file.unlink()
         if processed_audio_path.exists():
             processed_audio_path.unlink()
         raise

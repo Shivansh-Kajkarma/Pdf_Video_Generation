@@ -42,7 +42,7 @@ def main():
         
         # 1. AI Service (Text -> Audio + Timestamps)
         logger.info("Step 1: Calling OpenAIService...")
-        openai_service = OpenAIService(voice="onyx")
+        openai_service = OpenAIService(voice="nova")
         raw_audio_path, timestamps_path = openai_service.generate_audio_with_timestamps(
             text=test_script,
             output_dir=job_dir,

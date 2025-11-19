@@ -30,7 +30,7 @@ class WordTimestamp(BaseModel):
 class FrameGeneratorV11:
     """
     Generates TRANSPARENT frames with clean "karaoke-style" animated text.
-    V11: Robust punctuation alignment, left-aligned, bigger font.
+    V11: Robust punctuation alignment, justified text alignment, proper margins and padding.
     """
     def __init__(self, timestamps_path: Path, bg_width: int, bg_height: int):
         logger.info("Initializing FrameGeneratorV11 (Robust Punctuation)...")
@@ -41,10 +41,20 @@ class FrameGeneratorV11:
         self.all_words, self.segments = self._load_data(timestamps_path)
 
         # --- 1. Load settings from config.py ---
-        self.font_size = max(40, int(self.bg_height / 6))
-        self.line_height = int(self.font_size * 1.15)
+        # Reduced font size to prevent text overflow
+        self.font_size = max(36, int(self.bg_height / 8))  # Smaller font for better fit
+        self.line_height = int(self.font_size * 1.2)  # Slightly more line spacing
         self.regular_font, self.bold_font = self._load_fonts(self.font_size)
-        self.max_text_width = int(self.bg_width * 0.90)
+        # Fixed 50px margins on all four sides (increased left margin for better padding)
+        self.margin = 80
+        # Use same margin for all sides, but ensure left has proper padding
+        self.left_margin = 160  # Increased left margin for better visual padding
+        self.right_margin = self.margin
+        self.top_margin = self.margin
+        self.bottom_margin = self.margin 
+        # Calculate available text area (accounting for different left/right margins, text left-aligned)
+        self.max_text_width = self.bg_width - self.left_margin - self.right_margin
+        self.max_text_height = self.bg_height - (2 * self.margin)
         # self.min_words_per_slide = 8
         
         self.slides, self.slide_layouts, self.slide_start_times = self._build_grouped_slides()
@@ -91,7 +101,8 @@ class FrameGeneratorV11:
         draw = ImageDraw.Draw(dummy_img)
         space_bbox = draw.textbbox((0, 0), " ", font=self.bold_font); space_width = space_bbox[2] - space_bbox[0]
 
-        MAX_WORDS_PER_SLIDE = 10
+        MAX_WORDS_PER_SLIDE = 20 #allow up to 20 words per slide
+        MAX_LINES_PER_SLIDE = 5 #maximum 5 lines per slide
 
         current_slide_words_ts, current_slide_start_time, current_slide_segments = [], -1, []
 
@@ -108,55 +119,242 @@ class FrameGeneratorV11:
 
             current_slide_lines, current_line = [], []
             for word in words_ts:
-                word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font); word_width = word_bbox[2] - word_bbox[0]
-                line_bbox = draw.textbbox((0, 0), " ".join(w.word for w in current_line), font=self.bold_font); line_width = line_bbox[2] - line_bbox[0]
-                if line_width + word_width + space_width > self.max_text_width and current_line:
-                    current_slide_lines.append(current_line); current_line = [word]
+                word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font)
+                word_width = word_bbox[2] - word_bbox[0]
+                
+                # Calculate current line width including the new word
+                if current_line:
+                    # Build test line with new word to get accurate width
+                    test_line = current_line + [word]
+                    line_text = " ".join(w.word for w in test_line)
+                    line_bbox = draw.textbbox((0, 0), line_text, font=self.bold_font)
+                    test_line_width = line_bbox[2] - line_bbox[0]
+                    
+                    # Use 90% of max width as threshold for safety (very conservative)
+                    threshold = self.max_text_width * 0.90
+                    if test_line_width > threshold:
+                        # Current line is full, start new line
+                        current_slide_lines.append(current_line)
+                        current_line = [word]
+                    else:
+                        current_line.append(word)
                 else:
+                    # First word in line - check if single word fits
+                    if word_width > self.max_text_width:
+                        # Word is too long, truncate or handle (shouldn't happen often)
+                        logger.warning(f"Word '{word.word}' is wider than max width ({word_width} > {self.max_text_width})")
                     current_line.append(word)
-            if current_line: current_slide_lines.append(current_line)
+            if current_line: 
+                current_slide_lines.append(current_line)
+
+            # Check if slide has too many lines and reduce verbosity of warnings
+            total_text_height = len(current_slide_lines) * self.line_height
+            if len(current_slide_lines) > MAX_LINES_PER_SLIDE:
+                # Only log as debug to reduce noise - slides will still render
+                logger.debug(f"Slide {slide_index} has {len(current_slide_lines)} lines (max recommended: {MAX_LINES_PER_SLIDE})")
+            elif total_text_height > self.bg_height * 0.95:
+                logger.warning(f"Slide {slide_index} (starting {start_time}s) may be too tall! Has {len(current_slide_lines)} lines.")
 
             slides.append(current_slide_lines); layouts[slide_index] = {}
-            total_text_height = len(current_slide_lines) * self.line_height
-            
-            # If text is *still* too tall, warn about it.
-            # This can happen if one segment is just massive.
-            if total_text_height > self.bg_height * 0.95:
-                 logger.warning(f"Slide {slide_index} (starting {start_time}s) may be too tall! Has {len(current_slide_lines)} lines.")
 
-            start_y = (self.bg_height - total_text_height) // 2; current_y = start_y
+            # Text area boundaries (equal margins on all sides)
+            text_area_start_x = self.left_margin
+            text_area_end_x = self.bg_width - self.right_margin
+            text_area_width = text_area_end_x - text_area_start_x
+            
+            # Center vertically: start_y = (total_height - text_block_height) / 2
+            start_y = self.top_margin + (self.max_text_height - total_text_height) // 2
+            current_y = start_y
+            max_x = text_area_end_x
+            
             for line_of_words in current_slide_lines:
-                current_x = int(self.bg_width * 0.05)
+                # Calculate justified text positions
+                if len(line_of_words) == 0:
+                    current_y += self.line_height
+                    continue
+                
+                # Calculate total width of all words (without spaces)
+                word_widths = []
+                total_words_width = 0
                 for word in line_of_words:
-                    layouts[slide_index][id(word)] = (current_x, current_y)
-                    word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font); word_width = word_bbox[2] - word_bbox[0]
-                    current_x += word_width + space_width
+                    word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font)
+                    word_width = word_bbox[2] - word_bbox[0]
+                    word_widths.append(word_width)
+                    total_words_width += word_width
+                
+                # Calculate available width for this line
+                # Account for the last word's width to prevent overflow
+                last_word_width = word_widths[-1] if word_widths else 0
+                line_available_width = self.max_text_width - last_word_width
+                
+                # Calculate normal spacing (with space_width between words)
+                num_spaces = len(line_of_words) - 1
+                normal_total_width = total_words_width + (num_spaces * space_width)
+                
+                # For justified alignment: only justify if spacing won't be excessive
+                # All text should be left-aligned (start at text_area_start_x)
+                
+                # If single word, left-align it
+                if len(line_of_words) == 1:
+                    # Single word: left-align
+                    current_x = text_area_start_x
+                    layouts[slide_index][id(line_of_words[0])] = (current_x, current_y)
+                # If line is nearly full or normal spacing already fills most of the line, left-align
+                elif total_words_width >= line_available_width * 0.95 or normal_total_width >= line_available_width * 0.90:
+                    # Line is nearly full: left-align
+                    current_x = text_area_start_x
+                    for i, word in enumerate(line_of_words):
+                        word_width = word_widths[i]
+                        # Ensure word fits - adjust position if needed
+                        if current_x + word_width > max_x:
+                            # Try to fit by positioning at max_x - word_width
+                            adjusted_x = max(text_area_start_x, max_x - word_width)
+                            if adjusted_x + word_width <= max_x:
+                                current_x = adjusted_x
+                            else:
+                                # Word is too wide, but still left-align it
+                                current_x = text_area_start_x
+                        layouts[slide_index][id(word)] = (current_x, current_y)
+                        current_x += word_width + space_width
+                else:
+                    # Justified alignment: distribute extra space between words
+                    # Calculate space needed excluding the last word (it will be positioned at the end)
+                    words_width_excluding_last = total_words_width - last_word_width
+                    if num_spaces > 0:
+                        total_space_needed = line_available_width - words_width_excluding_last
+                        space_between_words = total_space_needed / num_spaces
+                        
+                        # Limit maximum space between words to 2.5x normal space width
+                        # This prevents huge gaps when there are few words
+                        max_space = space_width * 2.5
+                        if space_between_words > max_space:
+                            # Space would be too large, fall back to left-aligned
+                            current_x = text_area_start_x
+                            for i, word in enumerate(line_of_words):
+                                word_width = word_widths[i]
+                                # Ensure word fits - adjust position if needed
+                                if current_x + word_width > max_x:
+                                    # Try to fit by positioning at max_x - word_width
+                                    adjusted_x = max(text_area_start_x, max_x - word_width)
+                                    if adjusted_x + word_width <= max_x:
+                                        current_x = adjusted_x
+                                    else:
+                                        # Word is too wide, but still left-align it
+                                        current_x = text_area_start_x
+                                layouts[slide_index][id(word)] = (current_x, current_y)
+                                current_x += word_width + space_width
+                        else:
+                            # Justified alignment with reasonable spacing
+                            # Use full width for justified text (spans from left to right margin)
+                            current_x = text_area_start_x
+                            for i, word in enumerate(line_of_words):
+                                word_width = word_widths[i]
+                                
+                                # Last word: position it so it ends at max_x (right-aligned for justified effect)
+                                if i == len(line_of_words) - 1:
+                                    current_x = max_x - word_width
+                                    # Safety check: ensure word doesn't go before text area start
+                                    if current_x < text_area_start_x:
+                                        current_x = text_area_start_x
+                                else:
+                                    # Safety check: ensure word fits - adjust if needed
+                                    if current_x + word_width > max_x:
+                                        # Try to fit by positioning at max_x - word_width
+                                        adjusted_x = max(text_area_start_x, max_x - word_width)
+                                        if adjusted_x + word_width <= max_x:
+                                            current_x = adjusted_x
+                                        else:
+                                            # Word is too wide, but still left-align it
+                                            current_x = text_area_start_x
+                                
+                                layouts[slide_index][id(word)] = (current_x, current_y)
+                                
+                                # Add word width plus justified space (except after last word)
+                                if i < len(line_of_words) - 1:
+                                    current_x += word_width + space_between_words
+                    else:
+                        # No spaces (shouldn't happen with multiple words, but handle it)
+                        space_between_words = space_width
+                        # Left-align
+                        current_x = text_area_start_x
+                        for i, word in enumerate(line_of_words):
+                            word_width = word_widths[i]
+                            # Ensure word fits - adjust position if needed
+                            if current_x + word_width > max_x:
+                                # Try to fit by positioning at max_x - word_width
+                                adjusted_x = max(text_area_start_x, max_x - word_width)
+                                if adjusted_x + word_width <= max_x:
+                                    current_x = adjusted_x
+                                else:
+                                    # Word is too wide, but still left-align it
+                                    current_x = text_area_start_x
+                            layouts[slide_index][id(word)] = (current_x, current_y)
+                            current_x += word_width + space_width
+                        
                 current_y += self.line_height
+            
+            # Verify all words have been assigned positions
+            words_in_layout = set(layouts[slide_index].keys())
+            words_in_slide = set(id(word) for line in current_slide_lines for word in line)
+            missing_words = words_in_slide - words_in_layout
+            if missing_words:
+                logger.warning(f"Slide {slide_index}: {len(missing_words)} words missing from layout. This should not happen.")
+                # Try to add missing words at the end of the last line
+                if current_slide_lines:
+                    last_line = current_slide_lines[-1]
+                    last_y = start_y + (len(current_slide_lines) - 1) * self.line_height
+                    # Left-align missing words
+                    current_x = text_area_start_x
+                    for word in last_line:
+                        if id(word) in missing_words:
+                            word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font)
+                            word_width = word_bbox[2] - word_bbox[0]
+                            if current_x + word_width <= max_x:
+                                layouts[slide_index][id(word)] = (current_x, last_y)
+                                current_x += word_width + space_width
+            
             slide_start_times.append(start_time)
+
+        def _word_ends_sentence(word_text: str) -> bool:
+            if not word_text:
+                return False
+            cleaned = word_text.strip().rstrip("”’\"')]} ")
+            if not cleaned:
+                return False
+            return cleaned[-1] in {".", "!", "?"}
+
+        last_word_text = None
 
         # main loop
         for i, segment in enumerate(self.segments):
             segment_words_ts = self._get_words_for_segment(i)
-            if not segment_words_ts: continue
+            if not segment_words_ts:
+                continue
 
-            # Check if adding this NEW segment will make the slide TOO BIG
-            if (len(current_slide_words_ts) + len(segment_words_ts) > MAX_WORDS_PER_SLIDE) and current_slide_words_ts:
-                
-                # 1. Build the PREVIOUS slide (it's full)
-                build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
-                
-                # 2. Reset and start the NEW slide with the current segment
-                current_slide_words_ts = segment_words_ts
-                current_slide_segments = [segment]
-                current_slide_start_time = segment["start"]
-            
-            else:
-                # --- It's not too big, so just add this segment to the current slide ---
-                if not current_slide_words_ts: 
-                    current_slide_start_time = segment["start"] # Set start time only for the first segment
-                current_slide_words_ts.extend(segment_words_ts)
-                current_slide_segments.append(segment)
-            ### ----------------- ###
+            for word_ts in segment_words_ts:
+                word_text = word_ts.word.strip()
+                # If previous word ended a sentence, start a new slide
+                if last_word_text and _word_ends_sentence(last_word_text) and current_slide_words_ts:
+                    build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
+                    current_slide_words_ts = []
+                    current_slide_segments = []
+                    current_slide_start_time = -1
+
+                if not current_slide_words_ts:
+                    current_slide_start_time = word_ts.start
+
+                current_slide_words_ts.append(word_ts)
+
+                if segment not in current_slide_segments:
+                    current_slide_segments.append(segment)
+
+                last_word_text = word_text
+
+                if len(current_slide_words_ts) >= MAX_WORDS_PER_SLIDE:
+                    build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
+                    current_slide_words_ts = []
+                    current_slide_segments = []
+                    current_slide_start_time = -1
 
         # --- Handle the VERY LAST slide after the loop finishes ---
         if current_slide_words_ts:
@@ -171,10 +369,21 @@ class FrameGeneratorV11:
             draw = ImageDraw.Draw(frame)
             slide_lines = self.slides[slide_index]
             layout = self.slide_layouts[slide_index]
+            max_x = self.bg_width - self.right_margin
+            
             for line in slide_lines:
                 for word in line:
                     coords = layout.get(id(word))
                     if not coords: continue
+                    
+                    # Safety check: ensure word doesn't overflow screen
+                    x, y = coords
+                    word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font)
+                    word_width = word_bbox[2] - word_bbox[0]
+                    
+                    if x + word_width > max_x:
+                        # Adjust position to prevent overflow
+                        x = max(self.left_margin, max_x - word_width)
                     
                     # --- 3. Load colors from config.py ---
                     if global_t >= word.start:
@@ -183,7 +392,7 @@ class FrameGeneratorV11:
                     else:
                         font = self.regular_font
                         color = settings.TEXT_REGULAR_COLOR
-                    draw.text(coords, word.word, font=font, fill=color)
+                    draw.text((x, y), word.word, font=font, fill=color)
             return np.array(frame)
         return generate_frame
 
@@ -204,11 +413,26 @@ class FrameGeneratorV11:
         slide_lines = self.slides[slide_index]
         layout = self.slide_layouts[slide_index]
         
+        max_x = self.bg_width - self.right_margin
+        
         for line in slide_lines:
             for word in line:
                 coords = layout.get(id(word))
                 if not coords:
                     continue
+                
+                # Safety check: ensure word doesn't overflow screen
+                x, y = coords
+                word_bbox = draw.textbbox((0, 0), word.word, font=self.bold_font)
+                word_width = word_bbox[2] - word_bbox[0]
+                
+                # Adjust position if word would overflow - don't skip it
+                if x + word_width > max_x:
+                    # Try to fit by positioning at max_x - word_width
+                    adjusted_x = max(self.left_margin, max_x - word_width)
+                    if adjusted_x + word_width <= max_x:
+                        x = adjusted_x
+                    # If still too wide, render it anyway (will be clipped but visible)
                 
                 # State-based logic: check if word has started
                 if global_t >= word.start:
@@ -218,7 +442,7 @@ class FrameGeneratorV11:
                     font = self.regular_font
                     color = settings.TEXT_REGULAR_COLOR
                 
-                draw.text(coords, word.word, font=font, fill=color)
+                draw.text((x, y), word.word, font=font, fill=color)
         
         return frame
 
@@ -351,6 +575,12 @@ def _generate_frame_batch_worker(
         layout = slide_layouts[slide_index]
         
         # Render all words in the slide
+        # Use same margins as main renderer (80px left, 50px right)
+        left_margin = 80  # Increased left margin for better visual padding
+        right_margin = 50
+        max_text_width = width - left_margin - right_margin
+        max_x = width - right_margin
+        
         for line_idx, line in enumerate(slide_lines):
             for word_idx, word in enumerate(line):
                 # Look up coordinates using (line_index, word_index) as key
@@ -359,12 +589,25 @@ def _generate_frame_batch_worker(
                 if not coords:
                     continue
                 
+                # Safety check: ensure word doesn't overflow screen
+                x, y = coords
+                word_bbox = draw.textbbox((0, 0), word['word'], font=bold_font)
+                word_width = word_bbox[2] - word_bbox[0]
+                
+                # Adjust position if word would overflow - don't skip it
+                if x + word_width > max_x:
+                    # Try to fit by positioning at max_x - word_width
+                    adjusted_x = max(left_margin, max_x - word_width)
+                    if adjusted_x + word_width <= max_x:
+                        x = adjusted_x
+                    # If still too wide, render it anyway (will be clipped but visible)
+                
                 # State-based logic: use Whisper timestamp directly for accuracy
                 # This ensures word highlighting matches exactly when words are spoken
                 if timestamp >= word['start']:
-                    draw.text(coords, word['word'], font=bold_font, fill=bold_color)
+                    draw.text((x, y), word['word'], font=bold_font, fill=bold_color)
                 else:
-                    draw.text(coords, word['word'], font=regular_font, fill=regular_color)
+                    draw.text((x, y), word['word'], font=regular_font, fill=regular_color)
         
         # Save frame with optimized PNG settings
         frame_filename = output_dir / f"frame_{frame_num:06d}.png"
@@ -373,6 +616,22 @@ def _generate_frame_batch_worker(
         generated_files.append(str(frame_filename))
     
     return generated_files
+
+
+def _get_ffmpeg_path() -> str:
+    """Get the path to ffmpeg executable."""
+    import shutil
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        pass
+    
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        return ffmpeg_path
+    
+    raise FileNotFoundError("FFmpeg not found. Please install ffmpeg.")
 
 
 def _detect_hardware_codec() -> Tuple[str, List[str]]:
@@ -384,51 +643,138 @@ def _detect_hardware_codec() -> Tuple[str, List[str]]:
     """
     import subprocess
     
+    ffmpeg_path = _get_ffmpeg_path()
+    
     # Try NVIDIA NVENC
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [ffmpeg_path, "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
             timeout=5
         )
         if "h264_nvenc" in result.stdout:
             logger.info("Detected NVIDIA GPU - using h264_nvenc")
-            return "h264_nvenc", ["-preset", "fast", "-rc", "vbr", "-cq", "23"]
+            # Optimized NVENC settings for speed: p1 preset (fastest), VBR with CQ
+            return "h264_nvenc", [
+                "-preset", "p1",  # Fastest preset
+                "-rc", "vbr",
+                "-cq", "23",
+                "-rc-lookahead", "32",
+                "-b_ref_mode", "middle"
+            ]
     except Exception:
         pass
     
     # Try Intel QuickSync
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [ffmpeg_path, "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
             timeout=5
         )
         if "h264_qsv" in result.stdout:
             logger.info("Detected Intel QuickSync - using h264_qsv")
-            return "h264_qsv", ["-preset", "fast", "-global_quality", "23"]
+            return "h264_qsv", ["-preset", "veryfast", "-global_quality", "23"]
     except Exception:
         pass
     
     # Try AMD AMF
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [ffmpeg_path, "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
             timeout=5
         )
         if "h264_amf" in result.stdout:
             logger.info("Detected AMD GPU - using h264_amf")
-            return "h264_amf", ["-quality", "balanced", "-rc", "vbr_peak"]
+            return "h264_amf", ["-quality", "speed", "-rc", "vbr_peak", "-qmin", "18", "-qmax", "28"]
     except Exception:
         pass
     
     # Fallback to software encoding
     logger.info("No hardware acceleration detected - using libx264 (software)")
-    return "libx264", ["-preset", "fast", "-crf", "23"]
+    return "libx264", ["-preset", "veryfast", "-crf", "23"]
+
+
+def _encode_video_with_ffmpeg(
+    video_clip: VideoClip,
+    audio_path: Path,
+    output_path: Path,
+    fps: int
+) -> Path:
+    """
+    Encode video directly with FFmpeg, bypassing MoviePy's slow encoding.
+    
+    Args:
+        video_clip: The composited video clip from MoviePy
+        audio_path: Path to audio file
+        output_path: Output video path
+        fps: Video FPS
+    
+    Returns:
+        Path to encoded video
+    """
+    import subprocess
+    
+    ffmpeg_path = _get_ffmpeg_path()
+    codec, codec_params = _detect_hardware_codec()
+    
+    # Use hardware encoding for temp file if available, otherwise use fastest software encoding
+    temp_codec, temp_codec_params = _detect_hardware_codec()
+    
+    # For temp file, use faster/lower quality settings since it's just intermediate
+    if temp_codec == "h264_nvenc":
+        temp_params = ["-preset", "p1", "-rc", "vbr", "-cq", "28", "-b:v", "10M"]  # Faster, lower quality temp
+    elif temp_codec == "h264_qsv":
+        temp_params = ["-preset", "veryfast", "-global_quality", "28", "-b:v", "10M"]
+    elif temp_codec == "h264_amf":
+        temp_params = ["-quality", "speed", "-rc", "vbr_peak", "-qmin", "24", "-qmax", "32", "-b:v", "10M"]
+    else:
+        temp_params = ["-preset", "ultrafast", "-crf", "28", "-tune", "zerolatency"]  # Fastest software
+    
+    temp_video = output_path.parent / f"{output_path.stem}_temp.mp4"
+    
+    try:
+        logger.info("Writing temporary video file (optimized for speed)...")
+        # Use hardware encoding for temp file if available
+        video_clip.write_videofile(
+            str(temp_video),
+            fps=fps,
+            codec=temp_codec,
+            audio=False,
+            ffmpeg_params=temp_params,
+            logger=None,
+            threads=4  # Use multiple threads
+        )
+        
+        # Build FFmpeg command for final encoding with hardware acceleration
+        # Use higher quality settings for final output
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-i", str(temp_video),
+            "-i", str(audio_path),
+            "-c:v", codec,
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-shortest"
+        ]
+        cmd.extend(codec_params)
+        cmd.append(str(output_path))
+        
+        logger.info(f"Encoding final video with {codec}...")
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        
+        logger.info("Video encoding complete")
+        return output_path
+        
+    finally:
+        # Cleanup temporary file
+        if temp_video.exists():
+            temp_video.unlink()
 
 
 # This is the "callable" version 
@@ -589,31 +935,19 @@ def render_video(
         
         # Composite with background
         final_video = CompositeVideoClip([bg_clip, frame_clip])
-        final_video = final_video.with_audio(audio_clip)
         
         # ====================================================================
-        # PHASE 4: Optimized Encoding
+        # PHASE 4: Optimized Encoding (Bypass MoviePy's slow encoding)
         # ====================================================================
         logger.info("--- Phase 4: Encoding video ---")
-        
-        # Detect hardware acceleration
-        codec, codec_params = _detect_hardware_codec()
-        
-        # Prepare FFmpeg parameters
-        ffmpeg_params = ["-pix_fmt", "yuv420p"] + codec_params
-        
         logger.info(f"Rendering {fps}fps video to: {output_path}")
-        logger.info(f"Using codec: {codec}")
         
-        final_video.write_videofile(
-            str(output_path),
-            fps=fps,
-            codec=codec,
-            audio_codec="aac",
-            preset="fast",
-            threads=os.cpu_count(),
-            ffmpeg_params=ffmpeg_params,
-            logger=None  # Suppress MoviePy's progress bar (we have tqdm)
+        # Use direct FFmpeg encoding for much faster performance
+        _encode_video_with_ffmpeg(
+            video_clip=final_video,
+            audio_path=audio_path,
+            output_path=output_path,
+            fps=fps
         )
         
         logger.info("--- Video Rendering Complete ---")
