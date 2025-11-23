@@ -759,14 +759,17 @@ class PipelineService:
                 progress=0
             )
             
-            # Read text from file (skip text cleaning step)
+            # Read text from file (skip text cleaning step, but remove commas)
             with open(text_path, 'r', encoding='utf-8') as f:
                 text_script = f.read()
             
             if not text_script.strip():
                 raise ValueError("Text content is empty. Cannot proceed.")
             
-            logger.info(f"Text loaded: {len(text_script)} characters (skipping text cleaning)")
+            # Remove commas from text for video generation
+            text_script = text_script.replace(',', '')
+            
+            logger.info(f"Text loaded: {len(text_script)} characters (commas removed, skipping other text cleaning)")
             
             # ===== AI SERVICES =====
             logger.info("--- AI SERVICES ---")
@@ -889,28 +892,27 @@ class PipelineService:
                 progress=70
             )
             
-            # Use custom background for reels (1488x1960)
+            # Use custom background for reels - load image to get actual dimensions
             reels_background_path = settings.BACKGROUNDS_PATH / "white-paper-texture-background.jpg"
-            reels_width = 1488
-            reels_height = 1960
             
-            # Calculate smaller font size (reduce by ~30% from main video)
-            # Main video uses: max(32, int(bg_height / 7))
-            # For reels: use smaller font
-            main_font_size = max(32, int(reels_height / 7))
-            reels_font_size = int(main_font_size * 0.7)  # 30% smaller
+            # Load background image to get actual dimensions (source of truth)
+            from PIL import Image
+            bg_image = Image.open(str(reels_background_path))
+            reels_width, reels_height = bg_image.size
             
-            logger.info(f"Reels video settings: {reels_width}x{reels_height}, font_size: {reels_font_size}")
+            logger.info(f"Reels video settings: Background={reels_background_path}, dimensions={reels_width}x{reels_height}")
+            logger.info("Using smart detection: font size and margins will be calculated automatically based on dimensions")
             
             final_video_path = job_dir / f"{job_id}_final_video.mp4"
+            # Don't pass font_size - let FrameGeneratorV11 calculate it based on reels mode
+            # Don't pass width/height - let render_video get them from the background image
             final_video_path = render_video(
                 audio_path=processed_audio_path,
                 timestamps_path=timestamps_path,
                 output_path=final_video_path,
-                background_path=reels_background_path,
-                width=reels_width,
-                height=reels_height,
-                font_size=reels_font_size
+                background_path=reels_background_path
+                # width and height will be detected from background image
+                # font_size will be calculated by FrameGeneratorV11 in reels mode
             )
             
             self.job_service.update_job(

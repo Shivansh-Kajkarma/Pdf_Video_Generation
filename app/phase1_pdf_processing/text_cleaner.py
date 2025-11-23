@@ -11,6 +11,7 @@ def _clean_punctuation_for_speech(text: str) -> str:
     """
     Clean punctuation that causes awkward speech (e.g., "slash" from "/").
     Preserves legitimate numeric expressions like decimals and ranges.
+    Removes commas from text for video generation.
     
     Args:
         text: Text content
@@ -25,7 +26,10 @@ def _clean_punctuation_for_speech(text: str) -> str:
     # Step 2: Remove email addresses
     text = re.sub(r'\b[\w\.-]+@[\w\.-]+\.\w+\b', '', text)
     
-    # Step 3: Replace "/" in common word patterns (like "and/or" -> "and or")
+    # Step 3: Remove all commas
+    text = text.replace(',', '')
+    
+    # Step 4: Replace "/" in common word patterns (like "and/or" -> "and or")
     # But preserve it in dates and numeric contexts
     
     # First, handle specific common patterns
