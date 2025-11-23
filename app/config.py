@@ -36,12 +36,21 @@ class Settings(BaseSettings):
     SERPER_API_KEY: str = os.getenv('SERPER_API_KEY', "")  # Optional, for genre detection
     
     # --- Video & Text Settings (from your files) ---
-    DEFAULT_FONT_REGULAR: str = str(FONTS_PATH / "PlayfairDisplay-Regular.ttf")
-    DEFAULT_FONT_BOLD: str = str(FONTS_PATH / "PlayfairDisplay-Medium.ttf")
-    DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "1920x1080-white-solid-color-background.jpg") #for 1080 p quality
-    # DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "854x480-white-background.jpg")     #for 480 p quality
+    # DEFAULT_FONT_REGULAR: str = str(FONTS_PATH / "PlayfairDisplay-Regular.ttf")
+    # DEFAULT_FONT_BOLD: str = str(FONTS_PATH / "PlayfairDisplay-Medium.ttf")
+
+
+
+    DEFAULT_FONT_REGULAR: str = str(FONTS_PATH / "Book_Antiqua.ttf")
+    DEFAULT_FONT_BOLD: str = str(FONTS_PATH / "Book_Antiqua.ttf")
+    print("Default font regular path:", DEFAULT_FONT_REGULAR)
+    DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "yellow_1920_1080.jpeg") #for 1080 p quality
+    # DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "yellow_480.jpeg")     #for 480 p quality
+    DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "1080_shorts.jpeg") #for 1080 p quality
+    # DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "480_shorts.jpeg") #for 1080 p quality
     
-    VIDEO_FPS: int = 30
+
+    VIDEO_FPS: int = 60
     VIDEO_WIDTH: int = 1920   #for 1080 p quality
     VIDEO_HEIGHT: int = 1080  #for 1080 p quality
     # VIDEO_WIDTH: int = 854    #for 480 p quality
@@ -101,9 +110,9 @@ if _env_file_path.exists():
         _logger.info(f"OPENAI_API_KEY loaded successfully (length: {len(settings.OPENAI_API_KEY)}): {masked_setting}")
     else:
         _logger.warning(f"OPENAI_API_KEY appears to be default value (length: {len(settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else 0}). Check .env file format.")
-        _logger.warning(f"Expected format in .env: OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxx (no quotes, no spaces around =)")
+        _logger.warning("Expected format in .env: OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxx (no quotes, no spaces around =)")
         if env_var_value and env_var_value != "sk-..." and len(env_var_value) > 10:
-            _logger.info(f"Using environment variable value instead.")
+            _logger.info("Using environment variable value instead.")
             settings.OPENAI_API_KEY = env_var_value
 else:
     _logger.warning(f".env file not found at: {_env_file_path}")

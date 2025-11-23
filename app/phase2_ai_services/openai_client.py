@@ -11,6 +11,47 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def restore_punctuation(data):
+    """
+    Maps punctuation from the full text back onto the word-level timestamps.
+    """
+    full_text = data.get("text", "")
+    words = data.get("words", [])
+    
+    if not full_text or not words:
+        return data
+
+    current_idx = 0
+    
+    for w in words:
+        word_str = w['word'].strip()
+        # Find this word in the full text, starting from where we left off
+        # We search for the word to align indices
+        match_idx = full_text.find(word_str, current_idx)
+        
+        if match_idx == -1:
+            continue
+            
+        # Calculate where the word ends in the full text
+        end_idx = match_idx + len(word_str)
+        
+        # Check the character immediately following the word
+        if end_idx < len(full_text):
+            next_char = full_text[end_idx]
+            
+            # If it's a punctuation mark, append it to the word object
+            if next_char in [".", ",", "!", "?", ";", ":"]:
+                w['word'] = word_str + next_char
+                current_idx = end_idx + 1 # Advance past the punctuation
+            else:
+                current_idx = end_idx # Advance past the word
+        else:
+            current_idx = end_idx
+
+    data['words'] = words
+    return data
+
+
 def detect_book_genre(book_title: str) -> str:
     """
     Detect book genre using Serper API web search.
@@ -623,21 +664,6 @@ class OpenAIService:
         logger.info(f"Job {job_id}: Raw audio saved to {audio_path}")
         
         # --- Call 2: Generate Timestamps (Whisper STT) ---
-        logger.info(f"Job {job_id}: Calling OpenAI Whisper API for timestamps...")
-        with open(audio_path, "rb") as audio_file:
-            transcription = self.client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="verbose_json",
-                timestamp_granularities=["word", "segment"]
-            )
-        
-        timestamps_data = transcription.model_dump()
-        
-        with open(timestamps_path, "w", encoding="utf-8") as f:
-            json.dump(timestamps_data, f, indent=2, ensure_ascii=False)
-            
-        logger.info(f"Job {job_id}: Timestamps saved to {timestamps_path}")
         
         return audio_path, timestamps_path
     
@@ -694,35 +720,6 @@ class OpenAIService:
             
             chunk_audio_files.append(chunk_audio)
             
-            # Get timestamps for chunk
-            with open(chunk_audio, "rb") as audio_file:
-                transcription = self.client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    response_format="verbose_json",
-                    timestamp_granularities=["word", "segment"]
-                )
-            
-            chunk_data = transcription.model_dump()
-            
-            # Adjust timestamps with offset
-            if "words" in chunk_data:
-                for word in chunk_data["words"]:
-                    word["start"] += total_duration
-                    word["end"] += total_duration
-                all_words.extend(chunk_data["words"])
-            
-            if "segments" in chunk_data:
-                for segment in chunk_data["segments"]:
-                    segment["start"] += total_duration
-                    segment["end"] += total_duration
-                all_segments.extend(chunk_data["segments"])
-            
-            # Update total duration
-            if chunk_data.get("duration"):
-                total_duration += chunk_data["duration"]
-            elif all_segments:
-                total_duration = all_segments[-1]["end"]
         
         # Combine audio files using ffmpeg
         logger.info(f"Job {job_id}: Combining {len(chunk_audio_files)} audio chunks...")
@@ -759,21 +756,8 @@ class OpenAIService:
         if concat_file.exists():
             concat_file.unlink()
         
-        # Save combined timestamps
-        combined_data = {
-            "text": " ".join(chunks),
-            "language": chunk_data.get("language", "en"),
-            "duration": total_duration,
-            "words": all_words,
-            "segments": all_segments
-        }
         
-        with open(timestamps_path, "w", encoding="utf-8") as f:
-            json.dump(combined_data, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"Job {job_id}: Combined audio and timestamps saved")
-        
-        return audio_path, timestamps_path
+        return audio_path, 
     
     def _get_ffmpeg_path(self) -> str:
         """Get the path to ffmpeg executable."""
