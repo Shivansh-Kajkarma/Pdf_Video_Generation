@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     # --- Video & Text Settings (from your files) ---
     DEFAULT_FONT_REGULAR: str = str(FONTS_PATH / "Book Antiqua.ttf")
     DEFAULT_FONT_BOLD: str = str(FONTS_PATH / "Book Antiqua.ttf")
-    DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "1920x1080-white-solid-color-background.jpg") #for 1080 p quality
+    DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "yellow_1920_1080.jpeg") #for 1080 p quality
     # DEFAULT_BACKGROUND: str = str(BACKGROUNDS_PATH / "854x480-white-background.jpg")     #for 480 p quality
     
     VIDEO_FPS: int = 30
@@ -65,8 +65,8 @@ class Settings(BaseSettings):
     VIDEO_CODEC: str = "libx264"
     
     # Text colors 
-    TEXT_REGULAR_COLOR: tuple = (170, 170, 170, 255) # Grey
-    TEXT_BOLD_COLOR: tuple = (0, 0, 0, 255) # Black
+    TEXT_REGULAR_COLOR: tuple = (210, 210, 210, 255) # Grey
+    TEXT_BOLD_COLOR: tuple = (20, 20, 20, 255) # Black
 
     # --- Summary Generation Settings ---
     SUMMARY_MODEL: str = "gpt-4o-mini"

@@ -26,6 +26,11 @@ class WordTimestamp(BaseModel):
     confidence: Optional[float] = None
     probability: Optional[float] = None
 
+def interpolate_color(start_color, end_color, progress):
+    return tuple(
+        int(start_color[i] + (end_color[i] - start_color[i]) * progress)
+        for i in range(4)
+    )
 
 class FrameGeneratorV11:
     """
@@ -2584,20 +2589,32 @@ def render_video(
                         # Adjust position to prevent overflow
                         x = max(frame_gen.left_margin, max_x - word_width)
                     
-                    # Word highlighting: bold when spoken, regular before
+                    FADE_DURATION = 0.5  # Duration of fade in seconds
+                    
                     if t >= word.start and t < word.end:
-                        # Word is currently being spoken - show as bold
+                        # Active: Bold & Dark
                         font = frame_gen.bold_font
                         color = settings.TEXT_BOLD_COLOR
                     elif t >= word.end:
-                        # Word has finished being spoken - keep it bold (already spoken)
+                        # Done: Bold & Dark
                         font = frame_gen.bold_font
                         color = settings.TEXT_BOLD_COLOR
+                    elif t >= word.start - FADE_DURATION:
+                        # Fading In: Interpolate Color
+                        progress = (t - (word.start - FADE_DURATION)) / FADE_DURATION
+                        # Clamp progress just in case
+                        progress = max(0.0, min(1.0, progress))
+                        
+                        # Interpolate between Regular (Light) and Bold (Dark) color
+                        color = interpolate_color(settings.TEXT_REGULAR_COLOR, settings.TEXT_BOLD_COLOR, progress)
+                        
+                        # Switch font weight halfway through fade
+                        font = frame_gen.bold_font if progress > 0.5 else frame_gen.regular_font
                     else:
-                        # Word hasn't been spoken yet - show as faded/light
+                        # Future: Regular & Light
                         font = frame_gen.regular_font
                         color = settings.TEXT_REGULAR_COLOR
-                    
+
                     draw.text((x, y), word.word, font=font, fill=color)
             
             return frame
@@ -2619,14 +2636,16 @@ def render_video(
             "-f", "image2pipe",
             "-vcodec", "png",
             "-r", str(fps),
-            "-i", "-",  # Read from stdin
-            "-i", str(audio_path),  # Audio input
-            "-c:v", codec,
+            "-i", "-",                # Input from Pipe
+            "-i", str(audio_path),    # Input Audio
+            "-c:v", "libx264",        # Force software encoder (safest)
+            "-preset", "ultrafast",   # Speed over compression
+            "-crf", "23",             # Good quality
             "-c:a", "aac",
             "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
-            "-shortest",
-            "-r", str(fps)
+            "-pix_fmt", "yuv420p",    # Critical for compatibility
+            "-shortest",              # Stop when audio ends
+            str(output_path)
         ]
         cmd.extend(codec_params)
         cmd.append(str(output_path))
