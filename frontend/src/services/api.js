@@ -39,13 +39,16 @@ api.interceptors.response.use(
   }
 );
 
-export const uploadPDF = async (file, startPage, endPage, generateSummary = false, voiceProvider = 'openai', cartesiaVoiceId = null, cartesiaModelId = null) => {
+export const uploadPDF = async (file, startPage, endPage, generateSummary = false, voiceProvider = 'openai', openaiVoice = null, cartesiaVoiceId = null, cartesiaModelId = null) => {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('start_page', startPage);
   formData.append('end_page', endPage);
   formData.append('generate_summary', generateSummary);
   formData.append('voice_provider', voiceProvider);
+  if (voiceProvider === 'openai' && openaiVoice) {
+    formData.append('openai_voice', openaiVoice);
+  }
   if (cartesiaVoiceId) {
     formData.append('cartesia_voice_id', cartesiaVoiceId);
   }
@@ -113,10 +116,13 @@ export const summarizePDF = async (file) => {
   return response.data;
 };
 
-export const generateVideoFromText = async (text, voiceProvider = 'openai', cartesiaVoiceId = null, cartesiaModelId = null) => {
+export const generateVideoFromText = async (text, voiceProvider = 'openai', openaiVoice = null, cartesiaVoiceId = null, cartesiaModelId = null) => {
   const formData = new FormData();
   formData.append('text', text);
   formData.append('voice_provider', voiceProvider);
+  if (voiceProvider === 'openai' && openaiVoice) {
+    formData.append('openai_voice', openaiVoice);
+  }
   if (cartesiaVoiceId) {
     formData.append('cartesia_voice_id', cartesiaVoiceId);
   }
@@ -133,10 +139,13 @@ export const generateVideoFromText = async (text, voiceProvider = 'openai', cart
   return response.data;
 };
 
-export const generateReelsVideo = async (text, voiceProvider = 'openai', cartesiaVoiceId = null, cartesiaModelId = null) => {
+export const generateReelsVideo = async (text, voiceProvider = 'openai', openaiVoice = null, cartesiaVoiceId = null, cartesiaModelId = null) => {
   const formData = new FormData();
   formData.append('text', text);
   formData.append('voice_provider', voiceProvider);
+  if (voiceProvider === 'openai' && openaiVoice) {
+    formData.append('openai_voice', openaiVoice);
+  }
   if (cartesiaVoiceId) {
     formData.append('cartesia_voice_id', cartesiaVoiceId);
   }

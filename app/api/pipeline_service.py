@@ -38,6 +38,7 @@ class PipelineService:
         start_page: int = 50,
         end_page: int = 50,
         voice_provider: str = "openai",
+        openai_voice: Optional[str] = None,
         cartesia_voice_id: Optional[str] = None,
         cartesia_model_id: Optional[str] = None
     ):
@@ -226,8 +227,10 @@ class PipelineService:
                 logger.info(f"Using Cartesia for voice generation (Voice: {voice_id}, Model: {model_id})")
                 voice_service = CartesiaService(voice_id=voice_id, model_id=model_id)
             else:
-                logger.info(f"Using OpenAI for voice generation")
-                voice_service = OpenAIService(voice="onyx")
+                if not openai_voice:
+                    raise ValueError("OpenAI voice must be specified when using OpenAI provider")
+                logger.info(f"Using OpenAI for voice generation with voice: {openai_voice}")
+                voice_service = OpenAIService(voice=openai_voice)
             
             # Estimate number of chunks to provide progress updates
             # Rough estimate: ~900 tokens per chunk, ~4 chars per token
@@ -464,6 +467,7 @@ class PipelineService:
         job_id: str,
         text_path: Path,
         voice_provider: str = "openai",
+        openai_voice: Optional[str] = None,
         cartesia_voice_id: Optional[str] = None,
         cartesia_model_id: Optional[str] = None
     ):
@@ -593,8 +597,10 @@ class PipelineService:
                 logger.info(f"Using Cartesia (Voice: {voice_id}, Model: {model_id})")
                 voice_service = CartesiaService(voice_id=voice_id, model_id=model_id)
             else:
-                logger.info("Using OpenAI for voice generation")
-                voice_service = OpenAIService(voice="onyx")
+                if not openai_voice:
+                    raise ValueError("OpenAI voice must be specified when using OpenAI provider")
+                logger.info(f"Using OpenAI for voice generation with voice: {openai_voice}")
+                voice_service = OpenAIService(voice=openai_voice)
             
             raw_audio_path, timestamps_path = voice_service.generate_audio_with_timestamps(
                 text=text_script,
@@ -726,6 +732,7 @@ class PipelineService:
         job_id: str,
         text_path: Path,
         voice_provider: str = "openai",
+        openai_voice: Optional[str] = None,
         cartesia_voice_id: Optional[str] = None,
         cartesia_model_id: Optional[str] = None
     ):
@@ -819,8 +826,10 @@ class PipelineService:
                 logger.info(f"Using Cartesia (Voice: {voice_id}, Model: {model_id})")
                 voice_service = CartesiaService(voice_id=voice_id, model_id=model_id)
             else:
-                logger.info("Using OpenAI for voice generation")
-                voice_service = OpenAIService(voice="onyx")
+                if not openai_voice:
+                    raise ValueError("OpenAI voice must be specified when using OpenAI provider")
+                logger.info(f"Using OpenAI for voice generation with voice: {openai_voice}")
+                voice_service = OpenAIService(voice=openai_voice)
             
             raw_audio_path, timestamps_path = voice_service.generate_audio_with_timestamps(
                 text=text_script,
@@ -892,26 +901,26 @@ class PipelineService:
                 progress=70
             )
             
-            # Use custom background for reels - load image to get actual dimensions
-            reels_background_path = settings.BACKGROUNDS_PATH / "white-paper-texture-background.jpg"
+            # Reels video settings: 9:16 aspect ratio (1080x1920)
+            # Generate white background programmatically (no image file needed)
+            reels_width = 1080
+            reels_height = 1920
             
-            # Load background image to get actual dimensions (source of truth)
-            from PIL import Image
-            bg_image = Image.open(str(reels_background_path))
-            reels_width, reels_height = bg_image.size
-            
-            logger.info(f"Reels video settings: Background={reels_background_path}, dimensions={reels_width}x{reels_height}")
+            logger.info(f"Reels video settings: Generating solid white background programmatically")
+            logger.info(f"Reels dimensions: {reels_width}x{reels_height} (9:16 aspect ratio)")
             logger.info("Using smart detection: font size and margins will be calculated automatically based on dimensions")
             
             final_video_path = job_dir / f"{job_id}_final_video.mp4"
+            # Pass None for background_path - render_video will generate white background for reels
+            # Pass explicit width/height for 9:16 reels format
             # Don't pass font_size - let FrameGeneratorV11 calculate it based on reels mode
-            # Don't pass width/height - let render_video get them from the background image
             final_video_path = render_video(
                 audio_path=processed_audio_path,
                 timestamps_path=timestamps_path,
                 output_path=final_video_path,
-                background_path=reels_background_path
-                # width and height will be detected from background image
+                background_path=None,  # None = generate white background programmatically
+                width=reels_width,
+                height=reels_height
                 # font_size will be calculated by FrameGeneratorV11 in reels mode
             )
             
@@ -1106,6 +1115,7 @@ class PipelineService:
         self, 
         job_id: str,
         voice_provider: str = "openai",
+        openai_voice: Optional[str] = None,
         cartesia_voice_id: Optional[str] = None,
         cartesia_model_id: Optional[str] = None
     ):
@@ -1188,8 +1198,10 @@ class PipelineService:
                 logger.info(f"Using Cartesia for summary video voice generation (Voice: {cartesia_voice_id}, Model: {cartesia_model_id})")
                 voice_service = CartesiaService(voice_id=cartesia_voice_id, model_id=cartesia_model_id)
             else:
-                logger.info(f"Using OpenAI for summary video voice generation")
-                voice_service = OpenAIService(voice="onyx")
+                if not openai_voice:
+                    raise ValueError("OpenAI voice must be specified when using OpenAI provider")
+                logger.info(f"Using OpenAI for summary video voice generation with voice: {openai_voice}")
+                voice_service = OpenAIService(voice=openai_voice)
             
             summary_raw_audio_path, summary_timestamps_path = voice_service.generate_audio_with_timestamps(
                 text=summary_text,

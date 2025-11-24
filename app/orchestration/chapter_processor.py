@@ -406,6 +406,10 @@ def process_chapter_video(
             return None
         
         # Generate audio and timestamps
+        # Voice must be provided (no default)
+        if not voice:
+            raise ValueError("OpenAI voice must be specified for chapter video generation")
+        logger.info(f"Using OpenAI voice: {voice} for chapter: {chapter_title}")
         openai_service = OpenAIService(voice=voice)
         raw_audio_path, timestamps_path = openai_service.generate_audio_with_timestamps(
             text=cleaned_text,
