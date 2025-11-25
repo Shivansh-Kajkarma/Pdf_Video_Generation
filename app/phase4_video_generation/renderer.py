@@ -202,7 +202,7 @@ class FrameGeneratorV11:
         
         logger.info(f"Final word count: {len(words)} words and {len(segments)} segments.")
         return words, segments
-    
+
     def _map_punctuation_to_words(self, words: List[WordTimestamp], segments: List[Dict]) -> List[WordTimestamp]:
         """
         Map punctuation from segment text to word timestamps.
@@ -383,7 +383,7 @@ class FrameGeneratorV11:
         # This ensures words aren't missed due to minor timestamp discrepancies
         tolerance = 0.1  # 100ms tolerance
         words = [w for w in self.all_words if w.start >= segment_start - tolerance and w.start < segment_end + tolerance]
-        
+
         # Filter out words that have already been processed (if provided)
         if processed_words is not None:
             words = [w for w in words if id(w) not in processed_words]
@@ -807,7 +807,7 @@ class FrameGeneratorV11:
             logger.debug(f"Slide {slide_index}: {total_words_in_layout} words in layout, {total_words_in_slide} words in slide")
             
             slide_start_times.append(start_time)
-            
+
             # Return remaining words if any, otherwise None
             return remaining_words if remaining_words else None, None
 
@@ -967,7 +967,6 @@ class FrameGeneratorV11:
                         current_slide_start_time = word_ts.start
         else:
             # Main video: Process segment-by-segment (original logic)
-            # main loop
             for i, segment in enumerate(self.segments):
                 # Pass processed_words to avoid getting words that are already processed
                 segment_words_ts = self._get_words_for_segment(i, processed_words=words_processed)
@@ -991,19 +990,18 @@ class FrameGeneratorV11:
                     
                     # CRITICAL: If previous word ended a sentence, we MUST start a new slide
                     # This ensures new sentences ALWAYS start on a new slide, regardless of word/line limits
-                    # CRITICAL: If previous word ended a sentence, we MUST start a new slide
                     # Words after a full stop MUST ALWAYS start on a new slide
                     if sentence_just_ended:
                         # Previous word ended a sentence - finish current slide if it has words
-                        # CRITICAL: After a full stop, the next sentence MUST start on a completely fresh slide
                         if current_slide_words_ts:
                             # Finish the current slide (don't include the current word yet)
                             # Do NOT carry over remaining words - sentence boundaries are absolute
-                            logger.info(f"Starting new slide after sentence boundary. Word '{word_ts.word}' at {word_ts.start}s starts new sentence on new slide.")
+                            logger.info(
+                                f"Starting new slide after sentence boundary. Word '{word_ts.word}' at {word_ts.start}s starts new sentence on new slide."
+                            )
                             build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
                         
                         # ALWAYS start a completely new slide for the new sentence
-                        # This ensures sentences after full stops ALWAYS start on a new slide
                         current_slide_words_ts = []
                         current_slide_segments = []
                         current_slide_start_time = word_ts.start  # Start time for new sentence
@@ -1011,7 +1009,7 @@ class FrameGeneratorV11:
                     sentence_just_ended = False  # Reset flag
 
                     # Initialize new slide start time if needed
-                    if not current_slide_words_ts: 
+                    if not current_slide_words_ts:
                         current_slide_start_time = word_ts.start
 
                     # Add word to current slide
@@ -1025,13 +1023,12 @@ class FrameGeneratorV11:
                     # Words after a full stop MUST ALWAYS start on a new slide
                     if _word_ends_sentence(word_text):
                         # Finish this slide now - the next sentence will ALWAYS start on a new slide
-                        # CRITICAL: Do NOT carry over any remaining words to the next slide
-                        # After a full stop, the next sentence MUST start on a completely fresh slide
-                        logger.info(f"Word '{word_text}' ends sentence at {word_ts.start}s - finishing current slide. Next word will start new slide.")
+                        logger.info(
+                            f"Word '{word_text}' ends sentence at {word_ts.start}s - finishing current slide. Next word will start new slide."
+                        )
                         build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
                         
                         # ALWAYS start a completely new slide for the next sentence
-                        # Do not carry over any remaining words - sentence boundaries are absolute
                         current_slide_words_ts = []
                         current_slide_segments = []
                         current_slide_start_time = -1  # Will be set when next word is added
@@ -1050,7 +1047,9 @@ class FrameGeneratorV11:
                         overflow_word = current_slide_words_ts.pop()
                         words_added_to_slides.discard(id(overflow_word))
                         
-                        logger.debug(f"Word limit exceeded ({MAX_WORDS_PER_SLIDE} words). Moving '{overflow_word.word}' to next slide.")
+                        logger.debug(
+                            f"Word limit exceeded ({MAX_WORDS_PER_SLIDE} words). Moving '{overflow_word.word}' to next slide."
+                        )
                         
                         # Finalize current slide without the overflow word
                         build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
@@ -1178,6 +1177,7 @@ class FrameGeneratorV11:
         # Note: word is a WordTimestamp object, not a list, so we count lines instead
         words_in_slide_structures = sum(len(line) for slide in slides for line in slide)
         
+        missing_words: List[WordTimestamp] = []
         if words_in_slides < total_words:
             missing_count = total_words - words_in_slides
             logger.error(f"CRITICAL: {missing_count} words were NOT added to any slide!")
@@ -1209,11 +1209,11 @@ class FrameGeneratorV11:
                         current_slide_segments = []
                         current_slide_start_time = -1
                 
-                # Finalize any remaining words
-                if current_slide_words_ts:
-                    build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
-                
-                logger.info(f"Recovered {len(missing_words)} missing words")
+        # Finalize any remaining words
+        if current_slide_words_ts:
+            build_slide_layout(current_slide_words_ts, current_slide_segments, current_slide_start_time)
+        if missing_words:
+            logger.info(f"Recovered {len(missing_words)} missing words")
         elif words_in_slide_structures < total_words:
             logger.warning(f"Words tracked ({words_in_slides}) matches total, but slide structures only contain {words_in_slide_structures} words")
             logger.warning("This may indicate words are being lost during slide building")
@@ -2442,7 +2442,7 @@ def render_video(
             is_reels = height > width
         
         logger.info(f"Final video dimensions: {width}x{height}, is_reels={is_reels}")
-        
+
         # Initialize frame generator with optional custom font size and reels mode
         frame_gen = FrameGeneratorV11(
             timestamps_path=timestamps_path,
@@ -2656,7 +2656,7 @@ def render_video(
                 
                 # Convert to RGB (FFmpeg handles RGB better via pipe)
                 frame_rgb = frame_img.convert("RGB")
-                
+            
                 # Save frame to BytesIO and pipe to FFmpeg
                 frame_buffer = io.BytesIO()
                 frame_rgb.save(frame_buffer, format="PNG")
@@ -2672,7 +2672,7 @@ def render_video(
                 if frame_num % max(1, total_frames // 10) == 0:
                     progress = (frame_num / total_frames) * 100
                     logger.info(f"Generated {frame_num}/{total_frames} frames ({progress:.1f}%)")
-            
+        
             # Close stdin to signal end of input
             process.stdin.close()
             
