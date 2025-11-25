@@ -322,7 +322,7 @@ async def download_video(job_id: str):
         logger.error(f"Download error: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing download: {str(e)}")
     
-    
+
 @app.post("/api/jobs/{job_id}/generate-summary", response_model=JobResponse)
 async def generate_summary(
     job_id: str,
@@ -359,36 +359,50 @@ async def generate_summary(
         metadata=job.get("metadata")
     )
 
-
 @app.get("/api/jobs/{job_id}/download/summary")
 async def download_summary(job_id: str):
-    """
-    Download the generated summary file (if available).
+    """Redirect to S3 for summary text download."""
+    # 1. Read from Disk
+    job_dir = settings.JOBS_OUTPUT_PATH / job_id
+    metadata_path = job_dir / "job_metadata.json"
     
-    Args:
-        job_id: Unique job identifier
+    job_data = None
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, 'r') as f:
+                job_data = json.load(f)
+        except: pass
     
-    Returns:
-        Summary text file
-    """
-    job = job_service.get_job(job_id)
-    if not job:
+    if not job_data:
+        job_data = job_service.get_job(job_id)
+
+    if not job_data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
-    summary_path = job.get("metadata", {}).get("summary_path")
-    if not summary_path:
-        raise HTTPException(status_code=404, detail="Summary not available for this job")
-    
-    summary_file = Path(summary_path)
-    if not summary_file.exists():
-        raise HTTPException(status_code=404, detail="Summary file not found")
-    
-    return FileResponse(
-        path=str(summary_file),
-        filename=summary_file.name,
-        media_type="text/plain"
-    )
+    # 2. Generate S3 Link
+    try:
+        summary_path_str = job_data.get("metadata", {}).get("summary_path") or job_data.get("summary_path")
+        
+        if not summary_path_str:
+            raise HTTPException(status_code=404, detail="Summary not available")
 
+        local_path = Path(summary_path_str)
+        s3_key = f"jobs/{job_id}/{local_path.name}"
+        
+        url = s3_manager.generate_presigned_url(s3_key)
+        
+        if url:
+            return RedirectResponse(url=url)
+        else:
+            # Fallback
+            if local_path.exists():
+                return FileResponse(path=str(local_path), filename=local_path.name, media_type="text/plain")
+            raise HTTPException(status_code=500, detail="File missing from disk and S3 link failed")
+            
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        raise HTTPException(status_code=500, detail="Error processing download")
+    
 
 @app.post("/api/jobs/{job_id}/generate-summary-video", response_model=JobResponse)
 async def generate_summary_video(
@@ -446,37 +460,48 @@ async def generate_summary_video(
         metadata=job.get("metadata")
     )
 
-
 @app.get("/api/jobs/{job_id}/download/summary-video")
 async def download_summary_video(job_id: str):
-    """
-    Download the generated summary video file (if available).
+    """Redirect to S3 for summary video download."""
+    # 1. Read from Disk
+    job_dir = settings.JOBS_OUTPUT_PATH / job_id
+    metadata_path = job_dir / "job_metadata.json"
     
-    Args:
-        job_id: Unique job identifier
-    
-    Returns:
-        Summary video file
-    """
-    job = job_service.get_job(job_id)
-    if not job:
+    job_data = None
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, 'r') as f:
+                job_data = json.load(f)
+        except: pass
+            
+    if not job_data:
+        job_data = job_service.get_job(job_id)
+
+    if not job_data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     
-    summary_video_path = job.get("metadata", {}).get("summary_video_path")
-    if not summary_video_path:
-        raise HTTPException(status_code=404, detail="Summary video not available for this job")
-    
-    summary_video_file = Path(summary_video_path)
-    if not summary_video_file.exists():
-        raise HTTPException(status_code=404, detail="Summary video file not found")
-    
-    return FileResponse(
-        path=str(summary_video_file),
-        filename=summary_video_file.name,
-        media_type="video/mp4"
-    )
+    # 2. Generate S3 Link
+    try:
+        video_path_str = job_data.get("metadata", {}).get("summary_video_path") or job_data.get("summary_video_path")
+        
+        if not video_path_str:
+            raise HTTPException(status_code=404, detail="Summary video not available")
 
-
+        local_path = Path(video_path_str)
+        s3_key = f"jobs/{job_id}/{local_path.name}"
+        
+        url = s3_manager.generate_presigned_url(s3_key)
+        
+        if url:
+            return RedirectResponse(url=url)
+        else:
+            if local_path.exists():
+                return FileResponse(path=str(local_path), filename=local_path.name, media_type="video/mp4")
+            raise HTTPException(status_code=500, detail="File missing")
+            
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        raise HTTPException(status_code=500, detail="Error processing download")
 @app.post("/api/summarize-pdf", response_model=JobResponse)
 async def summarize_pdf(
     background_tasks: BackgroundTasks,
