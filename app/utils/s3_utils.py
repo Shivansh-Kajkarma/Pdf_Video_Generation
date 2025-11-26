@@ -35,16 +35,38 @@ class S3Manager:
             logger.warning("AWS Credentials missing. S3 features disabled.")
 
     def upload_file(self, local_path: Path, s3_key: str):
-        """Uploads a single file to S3 efficiently."""
+        """Uploads a single file to S3 efficiently with correct Content-Type."""
         if not self.s3: return False
         
         try:
             logger.info(f"Uploading {local_path.name} to S3...")
+            
+            # 1. Determine Content-Type based on extension
+            extra_args = {}
+            suffix = local_path.suffix.lower()
+            
+            if suffix == '.mp4':
+                extra_args['ContentType'] = 'video/mp4'
+            elif suffix == '.mp3':
+                extra_args['ContentType'] = 'audio/mpeg'
+            elif suffix == '.json':
+                extra_args['ContentType'] = 'application/json'
+            elif suffix == '.txt':
+                extra_args['ContentType'] = 'text/plain'
+            elif suffix == '.pdf':
+                extra_args['ContentType'] = 'application/pdf'
+            elif suffix in ['.jpg', '.jpeg']:
+                extra_args['ContentType'] = 'image/jpeg'
+            elif suffix == '.png':
+                extra_args['ContentType'] = 'image/png'
+            
+            # 2. Upload with ExtraArgs
             self.s3.upload_file(
                 str(local_path), 
                 self.bucket_name, 
                 s3_key,
-                Config=self.transfer_config
+                Config=self.transfer_config,
+                ExtraArgs=extra_args  # <--- THIS FIXES THE PLAYBACK ISSUE
             )
             return True
         except Exception as e:
