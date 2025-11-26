@@ -2646,6 +2646,7 @@ def render_video(
             "-b:a", "192k",
             "-pix_fmt", "yuv420p",    # Critical for compatibility
             "-max_muxing_queue_size", "1024", # Fixes buffer overflow
+            "-movflags", "+faststart",
             # "-shortest",            # <--- REMOVED to prevent early pipe closure
             str(output_path)
         ]
@@ -2748,6 +2749,7 @@ def render_video(
                     "-b:a", "192k",
                     "-pix_fmt", "yuv420p",
                     "-max_muxing_queue_size", "1024",
+                    "-movflags", "+faststart",
                     # "-shortest", # REMOVED HERE TOO
                     "-r", str(fps),
                     str(output_path)
