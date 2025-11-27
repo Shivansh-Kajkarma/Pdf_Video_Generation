@@ -137,7 +137,7 @@ class JobService:
         try:
             if job_dir.exists() and job_dir.is_dir():
                 logger.info(f"🧹 CLEANUP: Removing local files for job {job_id}...")
-                shutil.rmtree(job_dir)
+                # shutil.rmtree(job_dir)
                 logger.info(f"✅ CLEANUP: Job {job_id} removed from local disk.")
         except Exception as e:
             logger.error(f"Failed to clean up job {job_id}: {e}")
