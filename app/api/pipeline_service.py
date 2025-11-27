@@ -1,6 +1,7 @@
 """
 Pipeline service that runs the PDF-to-Video generation pipeline.
 """
+
 import logging
 import json
 from pathlib import Path
@@ -22,14 +23,56 @@ from app.api.job_service import JobService
 logger = logging.getLogger(__name__)
 
 
+def restore_punctuation(data):
+    """
+    Maps punctuation from the full text back onto the word-level timestamps.
+    """
+    full_text = data.get("text", "")
+    words = data.get("words", [])
+
+    if not full_text or not words:
+        return data
+
+    current_idx = 0
+
+    for w in words:
+        word_str = w["word"].strip()
+        # Find this word in the full text, starting from where we left off
+        # We search for the word to align indices
+        match_idx = full_text.find(word_str, current_idx)
+
+        if match_idx == -1:
+            continue
+
+        # Calculate where the word ends in the full text
+        end_idx = match_idx + len(word_str)
+
+        # Check the character immediately following the word
+        if end_idx < len(full_text):
+            next_char = full_text[end_idx]
+
+            # If it's a punctuation mark, append it to the word object
+            if next_char in [".", ",", "!", "?", ";", ":"]:
+                w["word"] = word_str + next_char
+                current_idx = end_idx + 1  # Advance past the punctuation
+            else:
+                current_idx = end_idx  # Advance past the word
+        else:
+            current_idx = end_idx
+
+    data["words"] = words
+    logger.info("Punctuation restored in timestamps data")
+    return data
+
+
 class PipelineService:
     """Service for running the PDF-to-Video pipeline."""
-    
+
     def __init__(self, job_service: Optional[JobService] = None):
         # Use provided job_service or create a new one
         # This allows sharing the same instance across the application
         self.job_service = job_service if job_service is not None else JobService()
-    
+
     def run_pipeline(
         self,
         job_id: str,
@@ -40,11 +83,11 @@ class PipelineService:
         voice_provider: str = "openai",
         openai_voice: Optional[str] = None,
         cartesia_voice_id: Optional[str] = None,
-        cartesia_model_id: Optional[str] = None
+        cartesia_model_id: Optional[str] = None,
     ):
         """
         Run the complete PDF-to-Video pipeline.
-        
+
         Args:
             job_id: Unique job identifier
             pdf_path: Path to the PDF file
@@ -54,42 +97,43 @@ class PipelineService:
         """
         job_dir = settings.JOBS_OUTPUT_PATH / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Setup logging
         setup_logging(job_id=job_id, log_level="INFO")
         logger = logging.getLogger(__name__)
-        
+
         logger.info(f"=== PIPELINE STARTED FOR JOB: {job_id} ===")
         logger.info(f"PDF Path: {pdf_path}")
         logger.info(f"Job Directory: {job_dir}")
         logger.info(f"Generate Summary: {generate_summary}")
         logger.info(f"Page Range: {start_page}-{end_page}")
-        
+
         try:
             logger.info(f"Updating job status to processing with progress 0%")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Starting PDF processing...",
-                progress=0
+                progress=0,
             )
             logger.info(f"Job status updated successfully")
-            
+
             # ===== PHASE 1: PDF PROCESSING =====
             logger.info("--- PHASE 1: PDF Processing ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Extracting text from PDF...",
-                progress=5
+                progress=5,
             )
-            extractor_service = PDFExtractorService(output_dir=settings.JOBS_OUTPUT_PATH)
+            extractor_service = PDFExtractorService(
+                output_dir=settings.JOBS_OUTPUT_PATH
+            )
             extraction_result = extractor_service.extract_from_pdf(
-                pdf_path=str(pdf_path),
-                job_id=job_id
+                pdf_path=str(pdf_path), job_id=job_id
             )
             book_type = extraction_result.get("book_type", "unknown")
-            
+
             raw_text_path = Path(extraction_result["output_files"]["full_text"])
             tables_dir_path = extraction_result["output_files"].get("tables_directory")
             if tables_dir_path:
@@ -97,85 +141,87 @@ class PipelineService:
             else:
                 tables_dir = job_dir / "tables"
                 tables_dir.mkdir(exist_ok=True)
-            
+
             images_dir = extract_images(pdf_path, job_dir)
-            
+
             logger.info(f"Book type detected: {book_type}")
             logger.info(f"Tables found: {extraction_result['summary']['tables_count']}")
-            
+
             # Update progress after PDF extraction
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="PDF extraction complete, filtering pages...",
-                progress=15
+                progress=15,
             )
-            
+
             # Filter text to specified page range
             json_path = Path(extraction_result["output_files"]["json"])
-            with open(json_path, 'r', encoding='utf-8') as f:
+            with open(json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            
+
             filtered_text = ""
-            for page in data['text_extraction']['pages']:
-                if start_page <= page['page_number'] <= end_page:
-                    filtered_text += page['text'] + "\n\n"
-            
+            for page in data["text_extraction"]["pages"]:
+                if start_page <= page["page_number"] <= end_page:
+                    filtered_text += page["text"] + "\n\n"
+
             if not filtered_text.strip():
                 raise ValueError(f"No text found for pages {start_page}-{end_page}.")
-            
-            filtered_text_path = job_dir / f"filtered_pages_{start_page}_to_{end_page}.txt"
-            with open(filtered_text_path, 'w', encoding='utf-8') as f:
+
+            filtered_text_path = (
+                job_dir / f"filtered_pages_{start_page}_to_{end_page}.txt"
+            )
+            with open(filtered_text_path, "w", encoding="utf-8") as f:
                 f.write(filtered_text)
-            
+
             # ===== PHASE 1.5: TEXT CLEANING =====
             logger.info("--- PHASE 1.5: Text Cleaning ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Cleaning text for narration...",
-                progress=20
+                progress=20,
             )
             cleaned_script_path = clean_text(
                 raw_text_path=filtered_text_path,
                 tables_dir=tables_dir,
                 images_dir=images_dir,
-                job_dir=job_dir
+                job_dir=job_dir,
             )
-            
+
             # Update progress after text cleaning
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Text cleaning complete",
-                progress=22
+                progress=22,
             )
-            
-            with open(cleaned_script_path, 'r', encoding='utf-8') as f:
+
+            with open(cleaned_script_path, "r", encoding="utf-8") as f:
                 text_script = f.read()
                 if not text_script.strip():
                     raise ValueError("Cleaned script is empty. Cannot proceed.")
-            
+
             # ===== PHASE 2: AI SERVICES =====
             logger.info("--- PHASE 2: AI Services ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Detecting book genre...",
-                progress=25
+                progress=25,
             )
-            
+
             book_title = pdf_path.stem
             genre = detect_book_genre(book_title)
             logger.info(f"Detected genre: {genre}")
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Generating audio narration...",
-                progress=30
+                progress=30,
             )
-            
+
             # Initialize metadata file if it doesn't exist
             metadata_path = job_dir / "job_metadata.json"
             if not metadata_path.exists():
@@ -187,11 +233,11 @@ class PipelineService:
                     "pdf_path": str(pdf_path),
                     "generate_summary": generate_summary,
                     "start_page": start_page,
-                    "end_page": end_page
+                    "end_page": end_page,
                 }
-                with open(metadata_path, 'w', encoding='utf-8') as f:
+                with open(metadata_path, "w", encoding="utf-8") as f:
                     json.dump(initial_metadata, f, indent=2)
-            
+
             job_metadata = {
                 "job_id": job_id,
                 "pdf_path": str(pdf_path),
@@ -204,161 +250,183 @@ class PipelineService:
                 "end_page": end_page,
                 "voice_provider": voice_provider,
             }
-            
+
             # Store Cartesia settings if using Cartesia
             if voice_provider.lower() == "cartesia":
                 if cartesia_voice_id:
                     job_metadata["cartesia_voice_id"] = cartesia_voice_id
                 if cartesia_model_id:
                     job_metadata["cartesia_model_id"] = cartesia_model_id
-            
+
             metadata_path = job_dir / "job_metadata.json"
-            
+
             def _write_metadata():
-                with open(metadata_path, 'w', encoding='utf-8') as meta_file:
+                with open(metadata_path, "w", encoding="utf-8") as meta_file:
                     json.dump(job_metadata, meta_file, indent=2)
-            
+
             _write_metadata()
-            
+
             # Initialize voice service based on provider
             if voice_provider.lower() == "cartesia":
-                voice_id = cartesia_voice_id or "98a34ef2-2140-4c28-9c71-663dc4dd7022"  # Default: Tessa
+                voice_id = (
+                    cartesia_voice_id or "98a34ef2-2140-4c28-9c71-663dc4dd7022"
+                )  # Default: Tessa
                 model_id = cartesia_model_id or "sonic-3"  # Default: sonic-3
-                logger.info(f"Using Cartesia for voice generation (Voice: {voice_id}, Model: {model_id})")
+                logger.info(
+                    f"Using Cartesia for voice generation (Voice: {voice_id}, Model: {model_id})"
+                )
                 voice_service = CartesiaService(voice_id=voice_id, model_id=model_id)
             else:
                 if not openai_voice:
-                    raise ValueError("OpenAI voice must be specified when using OpenAI provider")
-                logger.info(f"Using OpenAI for voice generation with voice: {openai_voice}")
+                    raise ValueError(
+                        "OpenAI voice must be specified when using OpenAI provider"
+                    )
+                logger.info(
+                    f"Using OpenAI for voice generation with voice: {openai_voice}"
+                )
                 voice_service = OpenAIService(voice=openai_voice)
-            
+
             # Estimate number of chunks to provide progress updates
             # Rough estimate: ~900 tokens per chunk, ~4 chars per token
             estimated_chars_per_chunk = 900 * 4
-            num_chunks = max(1, (len(text_script) + estimated_chars_per_chunk - 1) // estimated_chars_per_chunk)
-            logger.info(f"Estimated {num_chunks} chunks for audio generation")
-            
-            raw_audio_path, timestamps_path = voice_service.generate_audio_with_timestamps(
-                text=text_script,
-                output_dir=job_dir,
-                job_id=job_id,
-                genre=genre
+            num_chunks = max(
+                1,
+                (len(text_script) + estimated_chars_per_chunk - 1)
+                // estimated_chars_per_chunk,
             )
-            
+            logger.info(f"Estimated {num_chunks} chunks for audio generation")
+
+            raw_audio_path, timestamps_path = (
+                voice_service.generate_audio_with_timestamps(
+                    text=text_script, output_dir=job_dir, job_id=job_id, genre=genre
+                )
+            )
+
             # Update progress after audio generation
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Audio generation complete, processing audio...",
-                progress=50
+                progress=50,
             )
-            
+
             # ===== PHASE 3: AUDIO PROCESSING =====
             logger.info("--- PHASE 3: Audio Mastering ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Mastering audio quality...",
-                progress=55
+                progress=55,
             )
-            
+
             processed_audio_path = job_dir / f"{job_id}_processed_audio.mp3"
             processed_audio_path = master_audio(
-                raw_audio_path=raw_audio_path,
-                processed_audio_path=processed_audio_path
+                raw_audio_path=raw_audio_path, processed_audio_path=processed_audio_path
             )
-            
+
             # CRITICAL: Regenerate timestamps from processed audio to ensure perfect sync
             # This ensures timestamps match the exact audio used in the video
             # For OpenAI: Uses Whisper timestamps (native to OpenAI)
             # For Cartesia: Uses Whisper timestamps (Cartesia bytes endpoint doesn't provide timestamps)
             # Both providers get final timestamps from processed audio for perfect accuracy
-            logger.info(f"Regenerating timestamps from processed audio for perfect sync (provider: {voice_provider})...")
+            logger.info(
+                f"Regenerating timestamps from processed audio for perfect sync (provider: {voice_provider})..."
+            )
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Regenerating timestamps from processed audio for perfect sync...",
-                progress=58
+                progress=58,
             )
-            
+
             # Regenerate timestamps using Whisper on the processed audio
             # This ensures timestamps match the exact processed audio timing
             from openai import OpenAI
+
             openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
             with open(processed_audio_path, "rb") as audio_file:
                 transcription = openai_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
                     response_format="verbose_json",
-                    timestamp_granularities=["word", "segment"]
+                    timestamp_granularities=["word", "segment"],
                 )
-            
+
             # Save updated timestamps - these are the final timestamps used for video generation
             timestamps_data = transcription.model_dump()
+
+            # CRITICAL: Restore punctuation from Whisper's full text to word timestamps
+            timestamps_data = restore_punctuation(timestamps_data)
+
             with open(timestamps_path, "w", encoding="utf-8") as f:
                 json.dump(timestamps_data, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"Timestamps regenerated from processed audio: {len(timestamps_data.get('words', []))} words, {len(timestamps_data.get('segments', []))} segments")
-            logger.info(f"These timestamps will be used for frame generation to ensure perfect audio-video sync")
-            
+
+            logger.info(
+                f"Timestamps regenerated from processed audio: {len(timestamps_data.get('words', []))} words, {len(timestamps_data.get('segments', []))} segments"
+            )
+            logger.info(
+                f"These timestamps will be used for frame generation to ensure perfect audio-video sync"
+            )
+
             # Update progress after audio mastering
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Audio mastering complete",
-                progress=60
+                progress=60,
             )
-            
+
             # ===== PHASE 4: VIDEO GENERATION =====
             logger.info("--- PHASE 4: Video Rendering ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Rendering video frames...",
-                progress=70
+                progress=70,
             )
-            
+
             final_video_path = job_dir / f"{job_id}_final_video.mp4"
             final_video_path = render_video(
                 audio_path=processed_audio_path,
                 timestamps_path=timestamps_path,
-                output_path=final_video_path
+                output_path=final_video_path,
             )
-            
+
             # Update progress after video rendering
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Video frames rendered, encoding final video...",
-                progress=90
+                progress=90,
             )
-            
+
             # Small delay to ensure the update is visible
             import time
+
             time.sleep(0.5)
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Finalizing video...",
-                progress=95
+                progress=95,
             )
-            
+
             logger.info(f"--- MAIN VIDEO COMPLETE ---")
             logger.info(f"Final Video: {final_video_path}")
-            
+
             # Update metadata with video path
             job_metadata["final_video_path"] = str(final_video_path)
             _write_metadata()
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Main video completed",
                 metadata={"final_video_path": str(final_video_path)},
-                progress=100
+                progress=100,
             )
-            
+
             # ===== OPTIONAL SUMMARY GENERATION =====
             if generate_summary:
                 try:
@@ -366,50 +434,50 @@ class PipelineService:
                     self.job_service.update_job(
                         job_id=job_id,
                         status="processing",
-                        message="Generating book summary..."
+                        message="Generating book summary...",
                     )
-                    
+
                     # Get full book text for summary (not filtered)
-                    with open(raw_text_path, 'r', encoding='utf-8') as f:
+                    with open(raw_text_path, "r", encoding="utf-8") as f:
                         full_book_text = f.read()
-                    
+
                     summary_text, summary_stats = generate_book_summary(
                         book_text=full_book_text,
                         book_title=book_title,
                         genre=genre,
                         book_type=book_type,
                         target_word_count=settings.SUMMARY_TARGET_WORDS,
-                        max_word_count=settings.SUMMARY_MAX_WORDS
+                        max_word_count=settings.SUMMARY_MAX_WORDS,
                     )
-                    
+
                     summary_path = job_dir / f"{job_id}_summary.txt"
-                    summary_path.write_text(summary_text, encoding='utf-8')
-                    
+                    summary_path.write_text(summary_text, encoding="utf-8")
+
                     logger.info(
                         f"Summary saved to {summary_path} (~{summary_stats['word_count']} words, est {summary_stats['estimated_minutes']} min)."
                     )
-                    
+
                     job_metadata["summary"] = {
                         "path": str(summary_path),
-                        **summary_stats
+                        **summary_stats,
                     }
                     job_metadata["summary_path"] = str(summary_path)
                     _write_metadata()
-                    
+
                     self.job_service.update_job(
                         job_id=job_id,
                         status="processing",
                         message="Summary generated. Ready for summary video generation.",
-                        metadata={"summary_path": str(summary_path)}
+                        metadata={"summary_path": str(summary_path)},
                     )
-                    
+
                 except Exception as summary_error:
                     logger.error("Summary generation failed.", exc_info=True)
                     self.job_service.update_job(
                         job_id=job_id,
                         status="completed",
                         message=f"Main video completed, but summary generation failed: {str(summary_error)}",
-                        metadata={"summary_error": str(summary_error)}
+                        metadata={"summary_error": str(summary_error)},
                     )
             else:
                 # No summary requested, mark as completed
@@ -417,32 +485,35 @@ class PipelineService:
                 if "final_video_path" not in job_metadata:
                     job_metadata["final_video_path"] = str(final_video_path)
                 _write_metadata()
-                
+
                 self.job_service.update_job(
                     job_id=job_id,
                     status="completed",
                     message="Video generation completed successfully",
                     metadata=job_metadata,
-                    progress=100
+                    progress=100,
                 )
                 logger.info("--- PIPELINE SUCCESS (No summary requested) ---")
-            
+
         except Exception as e:
             error_msg = str(e)
             import traceback
+
             full_traceback = traceback.format_exc()
-            
-            logger.error(f"--- PIPELINE FAILED FOR JOB {job_id}: {error_msg} ---", exc_info=True)
+
+            logger.error(
+                f"--- PIPELINE FAILED FOR JOB {job_id}: {error_msg} ---", exc_info=True
+            )
             logger.error(f"Exception type: {type(e).__name__}")
             logger.error(f"Full traceback:\n{full_traceback}")
-            
+
             # Extract more detailed error information if available
             detailed_error = error_msg
-            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+            if hasattr(e, "response") and hasattr(e.response, "text"):
                 detailed_error = f"{error_msg}\nResponse: {e.response.text}"
-            elif hasattr(e, 'status_code'):
+            elif hasattr(e, "status_code"):
                 detailed_error = f"{error_msg} (Status: {e.status_code})"
-            
+
             try:
                 self.job_service.update_job(
                     job_id=job_id,
@@ -452,16 +523,19 @@ class PipelineService:
                         "error": error_msg,
                         "error_type": type(e).__name__,
                         "detailed_error": detailed_error,
-                        "traceback": full_traceback
-                    }
+                        "traceback": full_traceback,
+                    },
                 )
                 logger.info(f"Job status updated to failed")
             except Exception as update_error:
-                logger.error(f"Failed to update job status to failed: {update_error}", exc_info=True)
-            
+                logger.error(
+                    f"Failed to update job status to failed: {update_error}",
+                    exc_info=True,
+                )
+
             # Don't re-raise - background tasks should handle errors gracefully
             # The error is logged and job status is updated, so we don't need to crash
-    
+
     def run_pipeline_from_text(
         self,
         job_id: str,
@@ -469,12 +543,12 @@ class PipelineService:
         voice_provider: str = "openai",
         openai_voice: Optional[str] = None,
         cartesia_voice_id: Optional[str] = None,
-        cartesia_model_id: Optional[str] = None
+        cartesia_model_id: Optional[str] = None,
     ):
         """
         Run the video generation pipeline from text directly (skips PDF processing).
         Used for generating videos from summary text.
-        
+
         Args:
             job_id: Unique job identifier
             text_path: Path to the text file
@@ -484,92 +558,92 @@ class PipelineService:
         """
         job_dir = settings.JOBS_OUTPUT_PATH / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Setup logging
         setup_logging(job_id=job_id, log_level="INFO")
         logger = logging.getLogger(__name__)
-        
+
         logger.info(f"=== TEXT-TO-VIDEO PIPELINE STARTED FOR JOB: {job_id} ===")
         logger.info(f"Text Path: {text_path}")
         logger.info(f"Job Directory: {job_dir}")
-        
+
         try:
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Starting video generation from summary text...",
-                progress=0
+                progress=0,
             )
-            
+
             # Read text from file
-            with open(text_path, 'r', encoding='utf-8') as f:
+            with open(text_path, "r", encoding="utf-8") as f:
                 text_content = f.read()
-            
+
             if not text_content.strip():
                 raise ValueError("Text content is empty. Cannot proceed.")
-            
+
             logger.info(f"Text loaded: {len(text_content)} characters")
-            
+
             # ===== TEXT CLEANING =====
             logger.info("--- TEXT CLEANING ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Cleaning text for narration...",
-                progress=10
+                progress=10,
             )
-            
+
             # Create a temporary directory for tables/images (empty for text-only)
             tables_dir = job_dir / "tables"
             tables_dir.mkdir(exist_ok=True)
             images_dir = job_dir / "images"
             images_dir.mkdir(exist_ok=True)
-            
+
             # Save text to a temporary file for cleaning
             temp_text_path = job_dir / "temp_input_text.txt"
-            with open(temp_text_path, 'w', encoding='utf-8') as f:
+            with open(temp_text_path, "w", encoding="utf-8") as f:
                 f.write(text_content)
-            
+
             cleaned_script_path = clean_text(
                 raw_text_path=temp_text_path,
                 tables_dir=tables_dir,
                 images_dir=images_dir,
-                job_dir=job_dir
+                job_dir=job_dir,
             )
-            
-            with open(cleaned_script_path, 'r', encoding='utf-8') as f:
+
+            with open(cleaned_script_path, "r", encoding="utf-8") as f:
                 text_script = f.read()
                 if not text_script.strip():
                     raise ValueError("Cleaned script is empty. Cannot proceed.")
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Text cleaning complete",
-                progress=15
+                progress=15,
             )
-            
+
             # ===== AI SERVICES =====
             logger.info("--- AI SERVICES ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Detecting genre...",
-                progress=20
+                progress=20,
             )
-            
+
             # Use a generic title for text-based generation
             book_title = "Summary Video"
             genre = "general"  # Default genre for summaries
             logger.info(f"Using genre: {genre}")
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Generating audio narration...",
-                progress=25
+                progress=25,
             )
-            
+
             # Initialize metadata
             job_metadata = {
                 "job_id": job_id,
@@ -577,19 +651,19 @@ class PipelineService:
                 "genre": genre,
                 "created_at": datetime.now().isoformat(),
                 "voice_provider": voice_provider,
-                "source": "text"
+                "source": "text",
             }
-            
+
             if voice_provider.lower() == "cartesia":
                 if cartesia_voice_id:
                     job_metadata["cartesia_voice_id"] = cartesia_voice_id
                 if cartesia_model_id:
                     job_metadata["cartesia_model_id"] = cartesia_model_id
-            
+
             metadata_path = job_dir / "job_metadata.json"
-            with open(metadata_path, 'w', encoding='utf-8') as f:
+            with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(job_metadata, f, indent=2)
-            
+
             # Initialize voice service
             if voice_provider.lower() == "cartesia":
                 voice_id = cartesia_voice_id or "98a34ef2-2140-4c28-9c71-663dc4dd7022"
@@ -598,135 +672,146 @@ class PipelineService:
                 voice_service = CartesiaService(voice_id=voice_id, model_id=model_id)
             else:
                 if not openai_voice:
-                    raise ValueError("OpenAI voice must be specified when using OpenAI provider")
-                logger.info(f"Using OpenAI for voice generation with voice: {openai_voice}")
+                    raise ValueError(
+                        "OpenAI voice must be specified when using OpenAI provider"
+                    )
+                logger.info(
+                    f"Using OpenAI for voice generation with voice: {openai_voice}"
+                )
                 voice_service = OpenAIService(voice=openai_voice)
-            
-            raw_audio_path, timestamps_path = voice_service.generate_audio_with_timestamps(
-                text=text_script,
-                output_dir=job_dir,
-                job_id=job_id,
-                genre=genre
+
+            raw_audio_path, timestamps_path = (
+                voice_service.generate_audio_with_timestamps(
+                    text=text_script, output_dir=job_dir, job_id=job_id, genre=genre
+                )
             )
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Audio generation complete, processing audio...",
-                progress=50
+                progress=50,
             )
-            
+
             # ===== AUDIO PROCESSING =====
             logger.info("--- AUDIO PROCESSING ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Mastering audio quality...",
-                progress=55
+                progress=55,
             )
-            
+
             processed_audio_path = job_dir / f"{job_id}_processed_audio.mp3"
             processed_audio_path = master_audio(
-                raw_audio_path=raw_audio_path,
-                processed_audio_path=processed_audio_path
+                raw_audio_path=raw_audio_path, processed_audio_path=processed_audio_path
             )
-            
+
             # Regenerate timestamps from processed audio
-            logger.info("Regenerating timestamps from processed audio for perfect sync...")
+            logger.info(
+                "Regenerating timestamps from processed audio for perfect sync..."
+            )
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Regenerating timestamps from processed audio...",
-                progress=58
+                progress=58,
             )
-            
+
             from openai import OpenAI
+
             openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
             with open(processed_audio_path, "rb") as audio_file:
                 transcription = openai_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
                     response_format="verbose_json",
-                    timestamp_granularities=["word", "segment"]
+                    timestamp_granularities=["word", "segment"],
                 )
-            
+
             timestamps_data = transcription.model_dump()
+
+            # CRITICAL: Restore punctuation from Whisper's full text to word timestamps
+            timestamps_data = restore_punctuation(timestamps_data)
+
             with open(timestamps_path, "w", encoding="utf-8") as f:
                 json.dump(timestamps_data, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"Timestamps regenerated: {len(timestamps_data.get('words', []))} words")
-            
+
+            logger.info(
+                f"Timestamps regenerated: {len(timestamps_data.get('words', []))} words"
+            )
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Audio mastering complete",
-                progress=60
+                progress=60,
             )
-            
+
             # ===== VIDEO GENERATION =====
             logger.info("--- VIDEO GENERATION ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Rendering video frames...",
-                progress=70
+                progress=70,
             )
-            
+
             final_video_path = job_dir / f"{job_id}_final_video.mp4"
             final_video_path = render_video(
                 audio_path=processed_audio_path,
                 timestamps_path=timestamps_path,
-                output_path=final_video_path
+                output_path=final_video_path,
             )
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Video frames rendered, encoding final video...",
-                progress=90
+                progress=90,
             )
-            
+
             import time
+
             time.sleep(0.5)
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Finalizing video...",
-                progress=95
+                progress=95,
             )
-            
+
             logger.info(f"--- VIDEO COMPLETE ---")
             logger.info(f"Final Video: {final_video_path}")
-            
+
             # Update metadata
             job_metadata["final_video_path"] = str(final_video_path)
-            with open(metadata_path, 'w', encoding='utf-8') as f:
+            with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(job_metadata, f, indent=2)
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="completed",
                 message="Video generation completed successfully",
                 progress=100,
-                metadata={
-                    "final_video_path": str(final_video_path),
-                    "source": "text"
-                }
+                metadata={"final_video_path": str(final_video_path), "source": "text"},
             )
-            
+
             logger.info(f"=== TEXT-TO-VIDEO PIPELINE COMPLETED FOR JOB: {job_id} ===")
-            
+
         except Exception as e:
-            logger.error(f"Text-to-video pipeline failed for job {job_id}: {e}", exc_info=True)
+            logger.error(
+                f"Text-to-video pipeline failed for job {job_id}: {e}", exc_info=True
+            )
             self.job_service.update_job(
                 job_id=job_id,
                 status="failed",
                 message=f"Pipeline failed: {str(e)}",
-                metadata={"error": str(e)}
+                metadata={"error": str(e)},
             )
             raise
-    
+
     def run_pipeline_for_reels(
         self,
         job_id: str,
@@ -734,12 +819,12 @@ class PipelineService:
         voice_provider: str = "openai",
         openai_voice: Optional[str] = None,
         cartesia_voice_id: Optional[str] = None,
-        cartesia_model_id: Optional[str] = None
+        cartesia_model_id: Optional[str] = None,
     ):
         """
         Run the video generation pipeline for reels/shorts (skips PDF processing and text cleaning).
         Uses custom background image and smaller font size.
-        
+
         Args:
             job_id: Unique job identifier
             text_path: Path to the text file
@@ -749,55 +834,57 @@ class PipelineService:
         """
         job_dir = settings.JOBS_OUTPUT_PATH / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Setup logging
         setup_logging(job_id=job_id, log_level="INFO")
         logger = logging.getLogger(__name__)
-        
+
         logger.info(f"=== REELS/SHORTS VIDEO PIPELINE STARTED FOR JOB: {job_id} ===")
         logger.info(f"Text Path: {text_path}")
         logger.info(f"Job Directory: {job_dir}")
-        
+
         try:
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Starting reels/shorts video generation...",
-                progress=0
+                progress=0,
             )
-            
+
             # Read text from file (skip text cleaning step, but remove commas)
-            with open(text_path, 'r', encoding='utf-8') as f:
+            with open(text_path, "r", encoding="utf-8") as f:
                 text_script = f.read()
-            
+
             if not text_script.strip():
                 raise ValueError("Text content is empty. Cannot proceed.")
-            
+
             # Remove commas from text for video generation
-            text_script = text_script.replace(',', '')
-            
-            logger.info(f"Text loaded: {len(text_script)} characters (commas removed, skipping other text cleaning)")
-            
+            text_script = text_script.replace(",", "")
+
+            logger.info(
+                f"Text loaded: {len(text_script)} characters (commas removed, skipping other text cleaning)"
+            )
+
             # ===== AI SERVICES =====
             logger.info("--- AI SERVICES ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Detecting genre...",
-                progress=10
+                progress=10,
             )
-            
+
             # Use a generic title for reels
             book_title = "Reels/Shorts Video"
             genre = "general"  # Default genre for reels
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Generating audio narration...",
-                progress=15
+                progress=15,
             )
-            
+
             # Initialize metadata
             job_metadata = {
                 "job_id": job_id,
@@ -806,19 +893,19 @@ class PipelineService:
                 "created_at": datetime.now().isoformat(),
                 "voice_provider": voice_provider,
                 "source": "reels",
-                "video_type": "reels_shorts"
+                "video_type": "reels_shorts",
             }
-            
+
             if voice_provider.lower() == "cartesia":
                 if cartesia_voice_id:
                     job_metadata["cartesia_voice_id"] = cartesia_voice_id
                 if cartesia_model_id:
                     job_metadata["cartesia_model_id"] = cartesia_model_id
-            
+
             metadata_path = job_dir / "job_metadata.json"
-            with open(metadata_path, 'w', encoding='utf-8') as f:
+            with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(job_metadata, f, indent=2)
-            
+
             # Initialize voice service
             if voice_provider.lower() == "cartesia":
                 voice_id = cartesia_voice_id or "98a34ef2-2140-4c28-9c71-663dc4dd7022"
@@ -827,89 +914,106 @@ class PipelineService:
                 voice_service = CartesiaService(voice_id=voice_id, model_id=model_id)
             else:
                 if not openai_voice:
-                    raise ValueError("OpenAI voice must be specified when using OpenAI provider")
-                logger.info(f"Using OpenAI for voice generation with voice: {openai_voice}")
+                    raise ValueError(
+                        "OpenAI voice must be specified when using OpenAI provider"
+                    )
+                logger.info(
+                    f"Using OpenAI for voice generation with voice: {openai_voice}"
+                )
                 voice_service = OpenAIService(voice=openai_voice)
-            
-            raw_audio_path, timestamps_path = voice_service.generate_audio_with_timestamps(
-                text=text_script,
-                output_dir=job_dir,
-                job_id=job_id,
-                genre=genre
+
+            raw_audio_path, timestamps_path = (
+                voice_service.generate_audio_with_timestamps(
+                    text=text_script, output_dir=job_dir, job_id=job_id, genre=genre
+                )
             )
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Audio generation complete, processing audio...",
-                progress=50
+                progress=50,
             )
-            
+
             # ===== AUDIO PROCESSING =====
             logger.info("--- AUDIO PROCESSING ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Mastering audio quality...",
-                progress=55
+                progress=55,
             )
-            
+
             processed_audio_path = job_dir / f"{job_id}_processed_audio.mp3"
             processed_audio_path = master_audio(
-                raw_audio_path=raw_audio_path,
-                processed_audio_path=processed_audio_path
+                raw_audio_path=raw_audio_path, processed_audio_path=processed_audio_path
             )
-            
+
             # Regenerate timestamps from processed audio
-            logger.info("Regenerating timestamps from processed audio for perfect sync...")
+            logger.info(
+                "Regenerating timestamps from processed audio for perfect sync..."
+            )
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Regenerating timestamps from processed audio...",
-                progress=58
+                progress=58,
             )
-            
+
             from openai import OpenAI
+
             openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
             with open(processed_audio_path, "rb") as audio_file:
                 transcription = openai_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
                     response_format="verbose_json",
-                    timestamp_granularities=["word", "segment"]
+                    timestamp_granularities=["word", "segment"],
                 )
-            
+
             timestamps_data = transcription.model_dump()
+
+            # CRITICAL: Restore punctuation from Whisper's full text to word timestamps
+            timestamps_data = restore_punctuation(timestamps_data)
+
             with open(timestamps_path, "w", encoding="utf-8") as f:
                 json.dump(timestamps_data, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"Timestamps regenerated: {len(timestamps_data.get('words', []))} words")
-            
+
+            logger.info(
+                f"Timestamps regenerated: {len(timestamps_data.get('words', []))} words"
+            )
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Audio mastering complete",
-                progress=60
+                progress=60,
             )
-            
+
             # ===== VIDEO GENERATION =====
             logger.info("--- VIDEO GENERATION (REELS/SHORTS) ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Rendering video frames with custom background...",
-                progress=70
+                progress=70,
             )
-            
+
             # Reels video settings: 9:16 aspect ratio (1080x1920)
             # Generate white background programmatically (no image file needed)
             reels_width = 1080
             reels_height = 1920
-            
-            logger.info(f"Reels video settings: Generating solid white background programmatically")
-            logger.info(f"Reels dimensions: {reels_width}x{reels_height} (9:16 aspect ratio)")
-            logger.info("Using smart detection: font size and margins will be calculated automatically based on dimensions")
-            
+
+            logger.info(
+                f"Reels video settings: Generating solid white background programmatically"
+            )
+            logger.info(
+                f"Reels dimensions: {reels_width}x{reels_height} (9:16 aspect ratio)"
+            )
+            logger.info(
+                "Using smart detection: font size and margins will be calculated automatically based on dimensions"
+            )
+
             final_video_path = job_dir / f"{job_id}_final_video.mp4"
             # Pass None for background_path - render_video will generate white background for reels
             # Pass explicit width/height for 9:16 reels format
@@ -920,35 +1024,36 @@ class PipelineService:
                 output_path=final_video_path,
                 background_path=None,  # None = generate white background programmatically
                 width=reels_width,
-                height=reels_height
+                height=reels_height,
                 # font_size will be calculated by FrameGeneratorV11 in reels mode
             )
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Video frames rendered, encoding final video...",
-                progress=90
+                progress=90,
             )
-            
+
             import time
+
             time.sleep(0.5)
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Finalizing video...",
-                progress=95
+                progress=95,
             )
-            
+
             logger.info(f"--- REELS VIDEO COMPLETE ---")
             logger.info(f"Final Video: {final_video_path}")
-            
+
             # Update metadata
             job_metadata["final_video_path"] = str(final_video_path)
-            with open(metadata_path, 'w', encoding='utf-8') as f:
+            with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(job_metadata, f, indent=2)
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="completed",
@@ -957,99 +1062,96 @@ class PipelineService:
                 metadata={
                     "final_video_path": str(final_video_path),
                     "source": "reels",
-                    "video_type": "reels_shorts"
-                }
+                    "video_type": "reels_shorts",
+                },
             )
-            
-            logger.info(f"=== REELS/SHORTS VIDEO PIPELINE COMPLETED FOR JOB: {job_id} ===")
-            
+
+            logger.info(
+                f"=== REELS/SHORTS VIDEO PIPELINE COMPLETED FOR JOB: {job_id} ==="
+            )
+
         except Exception as e:
-            logger.error(f"Reels video pipeline failed for job {job_id}: {e}", exc_info=True)
+            logger.error(
+                f"Reels video pipeline failed for job {job_id}: {e}", exc_info=True
+            )
             self.job_service.update_job(
                 job_id=job_id,
                 status="failed",
                 message=f"Pipeline failed: {str(e)}",
-                metadata={"error": str(e)}
+                metadata={"error": str(e)},
             )
             raise
-    
+
     def generate_summary(self, job_id: str):
         """
         Generate a book summary after main video is complete.
-        
+
         Args:
             job_id: Unique job identifier
         """
         job_dir = settings.JOBS_OUTPUT_PATH / job_id
         setup_logging(job_id=job_id, log_level="INFO")
         logger = logging.getLogger(__name__)
-        
+
         try:
             job = self.job_service.get_job(job_id)
             if not job:
                 raise ValueError(f"Job {job_id} not found")
-            
+
             if job["status"] != "completed":
-                raise ValueError("Main video must be completed before generating summary")
-            
+                raise ValueError(
+                    "Main video must be completed before generating summary"
+                )
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Preparing book summary...",
-                metadata={
-                    "summary_status": "processing",
-                    "summary_progress": 5
-                }
+                metadata={"summary_status": "processing", "summary_progress": 5},
             )
-            
+
             # Load metadata
             metadata_path = job_dir / "job_metadata.json"
-            with open(metadata_path, 'r', encoding='utf-8') as f:
+            with open(metadata_path, "r", encoding="utf-8") as f:
                 job_metadata = json.load(f)
-            
+
             # Get full book text from extraction
             extraction_json_path = job_dir / f"{job_id}_extraction.json"
             if not extraction_json_path.exists():
                 raise ValueError("Extraction JSON not found. Cannot generate summary.")
-            
-            with open(extraction_json_path, 'r', encoding='utf-8') as f:
+
+            with open(extraction_json_path, "r", encoding="utf-8") as f:
                 extraction_data = json.load(f)
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Collecting full book text for summary...",
-                metadata={
-                    "summary_status": "processing",
-                    "summary_progress": 20
-                }
+                metadata={"summary_status": "processing", "summary_progress": 20},
             )
-            
+
             # Reconstruct full book text
             full_book_text = ""
-            for page in extraction_data.get('text_extraction', {}).get('pages', []):
-                full_book_text += page.get('text', '') + "\n\n"
-            
+            for page in extraction_data.get("text_extraction", {}).get("pages", []):
+                full_book_text += page.get("text", "") + "\n\n"
+
             if not full_book_text.strip():
                 raise ValueError("No text found in extraction data")
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Generating long-form summary (this may take a few minutes)...",
-                metadata={
-                    "summary_status": "processing",
-                    "summary_progress": 45
-                }
+                metadata={"summary_status": "processing", "summary_progress": 45},
             )
-            
+
             # Get book metadata
             book_title = job_metadata.get("book_title", "Unknown")
             genre = job_metadata.get("genre", "novel")
             book_type = job_metadata.get("book_type", "unknown")
-            
+
             logger.info("--- SUMMARY GENERATION (Target ~1 hour narration) ---")
-            
+
             # Generate summary
             summary_text, summary_stats = generate_book_summary(
                 book_text=full_book_text,
@@ -1057,35 +1159,29 @@ class PipelineService:
                 genre=genre,
                 book_type=book_type,
                 target_word_count=settings.SUMMARY_TARGET_WORDS,
-                max_word_count=settings.SUMMARY_MAX_WORDS
+                max_word_count=settings.SUMMARY_MAX_WORDS,
             )
-            
+
             summary_path = job_dir / f"{job_id}_summary.txt"
-            summary_path.write_text(summary_text, encoding='utf-8')
-            
+            summary_path.write_text(summary_text, encoding="utf-8")
+
             logger.info(
                 f"Summary saved to {summary_path} (~{summary_stats['word_count']} words, est {summary_stats['estimated_minutes']} min)."
             )
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Summary generated. Finalizing...",
-                metadata={
-                    "summary_status": "processing",
-                    "summary_progress": 85
-                }
+                metadata={"summary_status": "processing", "summary_progress": 85},
             )
-            
+
             # Update metadata
-            job_metadata["summary"] = {
-                "path": str(summary_path),
-                **summary_stats
-            }
+            job_metadata["summary"] = {"path": str(summary_path), **summary_stats}
             job_metadata["summary_path"] = str(summary_path)
-            with open(metadata_path, 'w', encoding='utf-8') as f:
+            with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(job_metadata, f, indent=2)
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="completed",
@@ -1093,10 +1189,10 @@ class PipelineService:
                 metadata={
                     "summary_path": str(summary_path),
                     "summary_status": "completed",
-                    "summary_progress": 100
-                }
+                    "summary_progress": 100,
+                },
             )
-            
+
         except Exception as e:
             logger.error(f"Summary generation failed: {e}", exc_info=True)
             self.job_service.update_job(
@@ -1106,22 +1202,22 @@ class PipelineService:
                 metadata={
                     "summary_error": str(e),
                     "summary_status": "failed",
-                    "summary_progress": 0
-                }
+                    "summary_progress": 0,
+                },
             )
             raise
-    
+
     def generate_summary_video(
-        self, 
+        self,
         job_id: str,
         voice_provider: str = "openai",
         openai_voice: Optional[str] = None,
         cartesia_voice_id: Optional[str] = None,
-        cartesia_model_id: Optional[str] = None
+        cartesia_model_id: Optional[str] = None,
     ):
         """
         Generate video from the summary text.
-        
+
         Args:
             job_id: Unique job identifier
             voice_provider: Voice provider ("openai" or "cartesia")
@@ -1131,156 +1227,184 @@ class PipelineService:
         job_dir = settings.JOBS_OUTPUT_PATH / job_id
         setup_logging(job_id=job_id, log_level="INFO")
         logger = logging.getLogger(__name__)
-        
+
         try:
             job = self.job_service.get_job(job_id)
             if not job:
                 raise ValueError(f"Job {job_id} not found")
-            
+
             summary_path = job.get("metadata", {}).get("summary_path")
             if not summary_path:
                 raise ValueError("Summary not available for this job")
-            
+
             summary_file = Path(summary_path)
             if not summary_file.exists():
                 raise ValueError("Summary file not found")
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Preparing summary video...",
                 metadata={
                     "summary_video_status": "processing",
-                    "summary_video_progress": 5
-                }
+                    "summary_video_progress": 5,
+                },
             )
-            
+
             # Read summary text
-            with open(summary_file, 'r', encoding='utf-8') as f:
+            with open(summary_file, "r", encoding="utf-8") as f:
                 summary_text = f.read()
-            
+
             # Get genre and book info from metadata
             metadata_path = job_dir / "job_metadata.json"
-            with open(metadata_path, 'r', encoding='utf-8') as f:
+            with open(metadata_path, "r", encoding="utf-8") as f:
                 job_metadata = json.load(f)
-            
+
             genre = job_metadata.get("genre", "novel")
             book_title = job_metadata.get("book_title", "Unknown")
-            
+
             # Create summary video directory
             summary_job_dir = job_dir / "summary_video"
             summary_job_dir.mkdir(exist_ok=True)
             summary_job_id = f"{job_id}_summary"
-            
+
             logger.info("--- SUMMARY VIDEO PIPELINE ---")
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Generating summary narration...",
                 metadata={
                     "summary_video_status": "processing",
-                    "summary_video_progress": 25
-                }
+                    "summary_video_progress": 25,
+                },
             )
-            
+
             # Use voice provider from parameters (or fallback to metadata)
-            voice_provider = voice_provider or job_metadata.get("voice_provider", "openai")
-            
+            voice_provider = voice_provider or job_metadata.get(
+                "voice_provider", "openai"
+            )
+
             # Get Cartesia settings from parameters or metadata
             if not cartesia_voice_id:
-                cartesia_voice_id = job_metadata.get("cartesia_voice_id") or "98a34ef2-2140-4c28-9c71-663dc4dd7022"
+                cartesia_voice_id = (
+                    job_metadata.get("cartesia_voice_id")
+                    or "98a34ef2-2140-4c28-9c71-663dc4dd7022"
+                )
             if not cartesia_model_id:
                 cartesia_model_id = job_metadata.get("cartesia_model_id") or "sonic-3"
-            
+
             # Initialize voice service based on provider
             if voice_provider.lower() == "cartesia":
-                logger.info(f"Using Cartesia for summary video voice generation (Voice: {cartesia_voice_id}, Model: {cartesia_model_id})")
-                voice_service = CartesiaService(voice_id=cartesia_voice_id, model_id=cartesia_model_id)
+                logger.info(
+                    f"Using Cartesia for summary video voice generation (Voice: {cartesia_voice_id}, Model: {cartesia_model_id})"
+                )
+                voice_service = CartesiaService(
+                    voice_id=cartesia_voice_id, model_id=cartesia_model_id
+                )
             else:
                 if not openai_voice:
-                    raise ValueError("OpenAI voice must be specified when using OpenAI provider")
-                logger.info(f"Using OpenAI for summary video voice generation with voice: {openai_voice}")
+                    raise ValueError(
+                        "OpenAI voice must be specified when using OpenAI provider"
+                    )
+                logger.info(
+                    f"Using OpenAI for summary video voice generation with voice: {openai_voice}"
+                )
                 voice_service = OpenAIService(voice=openai_voice)
-            
-            summary_raw_audio_path, summary_timestamps_path = voice_service.generate_audio_with_timestamps(
-                text=summary_text,
-                output_dir=summary_job_dir,
-                job_id=summary_job_id,
-                genre=genre
+
+            summary_raw_audio_path, summary_timestamps_path = (
+                voice_service.generate_audio_with_timestamps(
+                    text=summary_text,
+                    output_dir=summary_job_dir,
+                    job_id=summary_job_id,
+                    genre=genre,
+                )
             )
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Mastering summary narration audio...",
                 metadata={
                     "summary_video_status": "processing",
-                    "summary_video_progress": 50
-                }
+                    "summary_video_progress": 50,
+                },
             )
-            
+
             # Process audio
-            summary_processed_audio_path = summary_job_dir / f"{summary_job_id}_processed_audio.mp3"
+            summary_processed_audio_path = (
+                summary_job_dir / f"{summary_job_id}_processed_audio.mp3"
+            )
             summary_processed_audio_path = master_audio(
                 raw_audio_path=summary_raw_audio_path,
-                processed_audio_path=summary_processed_audio_path
+                processed_audio_path=summary_processed_audio_path,
             )
-            
+
             # Regenerate timestamps from processed audio to ensure perfect sync
-            logger.info("Regenerating summary timestamps from processed audio for perfect sync...")
+            logger.info(
+                "Regenerating summary timestamps from processed audio for perfect sync..."
+            )
             from openai import OpenAI
+
             openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
             with open(summary_processed_audio_path, "rb") as audio_file:
                 transcription = openai_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
                     response_format="verbose_json",
-                    timestamp_granularities=["word", "segment"]
+                    timestamp_granularities=["word", "segment"],
                 )
-            
+
             # Save updated timestamps
             timestamps_data = transcription.model_dump()
+
+            # CRITICAL: Restore punctuation from Whisper's full text to word timestamps
+            timestamps_data = restore_punctuation(timestamps_data)
+
             with open(summary_timestamps_path, "w", encoding="utf-8") as f:
                 json.dump(timestamps_data, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"Summary timestamps regenerated from processed audio: {len(timestamps_data.get('words', []))} words, {len(timestamps_data.get('segments', []))} segments")
-            
+
+            logger.info(
+                f"Summary timestamps regenerated from processed audio: {len(timestamps_data.get('words', []))} words, {len(timestamps_data.get('segments', []))} segments"
+            )
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Rendering summary video frames...",
                 metadata={
                     "summary_video_status": "processing",
-                    "summary_video_progress": 70
-                }
+                    "summary_video_progress": 70,
+                },
             )
-            
+
             # Render video
-            summary_final_video_path = summary_job_dir / f"{summary_job_id}_final_video.mp4"
+            summary_final_video_path = (
+                summary_job_dir / f"{summary_job_id}_final_video.mp4"
+            )
             summary_final_video_path = render_video(
                 audio_path=summary_processed_audio_path,
                 timestamps_path=summary_timestamps_path,
-                output_path=summary_final_video_path
+                output_path=summary_final_video_path,
             )
-            
+
             logger.info(f"Summary video created: {summary_final_video_path}")
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Encoding summary video...",
                 metadata={
                     "summary_video_status": "processing",
-                    "summary_video_progress": 90
-                }
+                    "summary_video_progress": 90,
+                },
             )
-            
+
             # Update metadata
             job_metadata["summary_video_path"] = str(summary_final_video_path)
-            with open(metadata_path, 'w', encoding='utf-8') as f:
+            with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(job_metadata, f, indent=2)
-            
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="completed",
@@ -1288,10 +1412,10 @@ class PipelineService:
                 metadata={
                     "summary_video_path": str(summary_final_video_path),
                     "summary_video_status": "completed",
-                    "summary_video_progress": 100
-                }
+                    "summary_video_progress": 100,
+                },
             )
-            
+
         except Exception as e:
             logger.error(f"Summary video generation failed: {e}", exc_info=True)
             self.job_service.update_job(
@@ -1301,44 +1425,40 @@ class PipelineService:
                 metadata={
                     "summary_video_error": str(e),
                     "summary_video_status": "failed",
-                    "summary_video_progress": 0
-                }
+                    "summary_video_progress": 0,
+                },
             )
             raise
 
-    def run_pipeline_from_audio(
-        self,
-        job_id: str,
-        audio_path: Path
-    ):
+    def run_pipeline_from_audio(self, job_id: str, audio_path: Path):
         """
         Run pipeline starting from a manually uploaded audio file.
         """
         job_dir = settings.JOBS_OUTPUT_PATH / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        
+
         setup_logging(job_id=job_id, log_level="INFO")
         logger = logging.getLogger(__name__)
-        
+
         logger.info(f"=== AUDIO-TO-VIDEO PIPELINE STARTED FOR JOB: {job_id} ===")
-        
+
         try:
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Processing uploaded audio...",
-                progress=10
+                progress=10,
             )
-            
+
             # Initialize metadata
             metadata_path = job_dir / "job_metadata.json"
             job_metadata = {
                 "job_id": job_id,
                 "source": "manual_audio",
                 "created_at": datetime.now().isoformat(),
-                "original_audio_path": str(audio_path)
+                "original_audio_path": str(audio_path),
             }
-            with open(metadata_path, 'w', encoding='utf-8') as f:
+            with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(job_metadata, f, indent=2)
 
             # ===== PHASE 1: AUDIO MASTERING =====
@@ -1347,79 +1467,85 @@ class PipelineService:
                 job_id=job_id,
                 status="processing",
                 message="Mastering audio quality...",
-                progress=20
+                progress=20,
             )
-            
+
             processed_audio_path = job_dir / f"{job_id}_processed_audio.mp3"
             # Use your existing mastering logic
             processed_audio_path = master_audio(
-                raw_audio_path=audio_path,
-                processed_audio_path=processed_audio_path
+                raw_audio_path=audio_path, processed_audio_path=processed_audio_path
             )
-            
+
             # ===== PHASE 2: TRANSCRIPTION (Get Text & Timestamps) =====
             logger.info("Generating timestamps and text from audio...")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Transcribing audio to generate text and timestamps...",
-                progress=40
+                progress=40,
             )
-            
+
             from openai import OpenAI
+
             openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
-            
+
             with open(processed_audio_path, "rb") as audio_file:
                 transcription = openai_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
                     response_format="verbose_json",
-                    timestamp_granularities=["word", "segment"]
+                    timestamp_granularities=["word", "segment"],
                 )
-            
+
             timestamps_data = transcription.model_dump()
+
+            # CRITICAL: Restore punctuation from Whisper's full text to word timestamps
+            timestamps_data = restore_punctuation(timestamps_data)
+
             timestamps_path = job_dir / f"{job_id}_timestamps.json"
             with open(timestamps_path, "w", encoding="utf-8") as f:
                 json.dump(timestamps_data, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"Transcription complete: {len(timestamps_data.get('words', []))} words")
-            
+
+            logger.info(
+                f"Transcription complete: {len(timestamps_data.get('words', []))} words"
+            )
+
             # ===== PHASE 3: VIDEO GENERATION =====
             logger.info("--- VIDEO GENERATION ---")
             self.job_service.update_job(
                 job_id=job_id,
                 status="processing",
                 message="Rendering video frames...",
-                progress=60
+                progress=60,
             )
-            
+
             final_video_path = job_dir / f"{job_id}_final_video.mp4"
             # Reuse your existing renderer!
             final_video_path = render_video(
                 audio_path=processed_audio_path,
                 timestamps_path=timestamps_path,
-                output_path=final_video_path
+                output_path=final_video_path,
             )
-            
+
             # ===== FINISH =====
             job_metadata["final_video_path"] = str(final_video_path)
-            with open(metadata_path, 'w', encoding='utf-8') as f:
+            with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(job_metadata, f, indent=2)
-                
+
             self.job_service.update_job(
                 job_id=job_id,
                 status="completed",
                 message="Video generation completed",
                 progress=100,
-                metadata=job_metadata
+                metadata=job_metadata,
             )
-            
+
         except Exception as e:
             logger.error(f"Pipeline failed: {e}", exc_info=True)
             self.job_service.update_job(
                 job_id=job_id,
                 status="failed",
                 message=f"Pipeline failed: {str(e)}",
-                metadata={"error": str(e)}
+                metadata={"error": str(e)},
             )
             raise

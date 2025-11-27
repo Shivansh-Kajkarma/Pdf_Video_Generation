@@ -11,60 +11,135 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def restore_punctuation(data):
+    """
+    Maps punctuation from the full text back onto the word-level timestamps.
+    """
+    full_text = data.get("text", "")
+    words = data.get("words", [])
+
+    if not full_text or not words:
+        return data
+
+    current_idx = 0
+
+    for w in words:
+        word_str = w["word"].strip()
+        # Find this word in the full text, starting from where we left off
+        # We search for the word to align indices
+        match_idx = full_text.find(word_str, current_idx)
+
+        if match_idx == -1:
+            continue
+
+        # Calculate where the word ends in the full text
+        end_idx = match_idx + len(word_str)
+
+        # Check the character immediately following the word
+        if end_idx < len(full_text):
+            next_char = full_text[end_idx]
+
+            # If it's a punctuation mark, append it to the word object
+            if next_char in [".", ",", "!", "?", ";", ":"]:
+                w["word"] = word_str + next_char
+                current_idx = end_idx + 1  # Advance past the punctuation
+            else:
+                current_idx = end_idx  # Advance past the word
+        else:
+            current_idx = end_idx
+
+    data["words"] = words
+    logger.info("Punctuation restored in timestamps data")
+    return data
+
+
 def detect_book_genre(book_title: str) -> str:
     """
     Detect book genre using Serper API web search.
-    
+
     Args:
         book_title: The title of the book (from PDF filename)
-    
+
     Returns:
         Detected genre (e.g., "novel", "self-help", "biography", etc.)
     """
     if not settings.SERPER_API_KEY:
         logger.warning("SERPER_API_KEY not set, using default genre")
         return "general"
-    
+
     try:
         # Clean book title (remove common PDF suffixes)
-        clean_title = re.sub(r'\s*\([^)]*\)\s*$', '', book_title)  # Remove (PDFDrive.com) etc
-        clean_title = re.sub(r'\s*-\s*PDF.*$', '', clean_title, flags=re.IGNORECASE)
+        clean_title = re.sub(
+            r"\s*\([^)]*\)\s*$", "", book_title
+        )  # Remove (PDFDrive.com) etc
+        clean_title = re.sub(r"\s*-\s*PDF.*$", "", clean_title, flags=re.IGNORECASE)
         clean_title = clean_title.strip()
-        
+
         # Search for book genre
         url = "https://google.serper.dev/search"
         headers = {
             "X-API-KEY": settings.SERPER_API_KEY,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        payload = {
-            "q": f"{clean_title} book genre",
-            "num": 3
-        }
-        
+        payload = {"q": f"{clean_title} book genre", "num": 3}
+
         logger.info(f"Searching for genre of: {clean_title}")
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         response.raise_for_status()
-        
+
         data = response.json()
-        
+
         # Extract genre from search results
         # First check for novel sub-genres (more specific)
         novel_subgenres = {
-            "novel-romance": ["romance novel", "romantic fiction", "romance book", "romantic novel"],
-            "novel-drama": ["drama novel", "dramatic fiction", "literary drama", "dramatic novel"],
-            "novel-mystery": ["mystery novel", "mystery fiction", "detective novel", "crime novel"],
+            "novel-romance": [
+                "romance novel",
+                "romantic fiction",
+                "romance book",
+                "romantic novel",
+            ],
+            "novel-drama": [
+                "drama novel",
+                "dramatic fiction",
+                "literary drama",
+                "dramatic novel",
+            ],
+            "novel-mystery": [
+                "mystery novel",
+                "mystery fiction",
+                "detective novel",
+                "crime novel",
+            ],
             "novel-thriller": ["thriller novel", "thriller fiction", "suspense novel"],
-            "novel-horror": ["horror novel", "horror fiction", "gothic novel", "supernatural fiction"],
+            "novel-horror": [
+                "horror novel",
+                "horror fiction",
+                "gothic novel",
+                "supernatural fiction",
+            ],
             "novel-fantasy": ["fantasy novel", "fantasy fiction", "epic fantasy"],
-            "novel-sci-fi": ["science fiction novel", "sci-fi novel", "sf novel", "speculative fiction"],
-            "novel-historical": ["historical novel", "historical fiction", "period novel"]
+            "novel-sci-fi": [
+                "science fiction novel",
+                "sci-fi novel",
+                "sf novel",
+                "speculative fiction",
+            ],
+            "novel-historical": [
+                "historical novel",
+                "historical fiction",
+                "period novel",
+            ],
         }
-        
+
         # Then check for general genres
         genre_keywords = {
             "novel": ["novel", "fiction", "literary fiction"],
-            "self-help": ["self-help", "self help", "personal development", "motivational"],
+            "self-help": [
+                "self-help",
+                "self help",
+                "personal development",
+                "motivational",
+            ],
             "biography": ["biography", "memoir", "autobiography"],
             "business": ["business", "entrepreneurship", "management", "economics"],
             "science": ["science", "scientific", "physics", "biology", "chemistry"],
@@ -74,34 +149,36 @@ def detect_book_genre(book_title: str) -> str:
             "mystery": ["mystery", "thriller", "crime", "detective"],
             "fantasy": ["fantasy", "sci-fi", "science fiction", "speculative fiction"],
             "romance": ["romance", "romantic"],
-            "horror": ["horror", "gothic", "supernatural"]
+            "horror": ["horror", "gothic", "supernatural"],
         }
-        
+
         # Check organic results and knowledge graph
         search_text = ""
         if "organic" in data:
             for result in data["organic"][:3]:
-                search_text += " " + result.get("title", "") + " " + result.get("snippet", "")
+                search_text += (
+                    " " + result.get("title", "") + " " + result.get("snippet", "")
+                )
         if "knowledgeGraph" in data:
             search_text += " " + str(data["knowledgeGraph"])
-        
+
         search_text = search_text.lower()
-        
+
         # First, check for novel sub-genres (more specific)
         for subgenre, keywords in novel_subgenres.items():
             if any(keyword in search_text for keyword in keywords):
                 logger.info(f"Detected genre: {subgenre}")
                 return subgenre
-        
+
         # Then check for general genres
         for genre, keywords in genre_keywords.items():
             if any(keyword in search_text for keyword in keywords):
                 logger.info(f"Detected genre: {genre}")
                 return genre
-        
+
         logger.info("Genre not detected, using default: general")
         return "general"
-        
+
     except Exception as e:
         logger.warning(f"Error detecting genre: {e}, using default")
         return "general"
@@ -110,10 +187,10 @@ def detect_book_genre(book_title: str) -> str:
 def get_voice_instructions_for_genre(genre: str) -> str:
     """
     Get voice instructions tailored to book genre.
-    
+
     Args:
         genre: Book genre (e.g., "novel", "self-help", etc.)
-    
+
     Returns:
         Voice instructions string for TTS
     """
@@ -181,7 +258,7 @@ Avoiding Robotic Patterns:
 
 Remember: The goal is to sound like a real person telling a story, not a machine reading text. Let your voice be expressive, warm, and human. Every pause, every emphasis, every change in tone should feel natural and purposeful.
 """
-    
+
     genre_specific = {
         "novel": """
 Genre-Specific Style (Fiction/Novel - General):
@@ -415,40 +492,48 @@ Genre-Specific Style (Horror):
 - Lower your voice and slow down during suspenseful passages.
 - Build tension through strategic pauses and emphasis.
 - Use a dramatic, engaging style that creates unease and anticipation.
-"""
+""",
     }
-    
+
     # Check for novel sub-genres first (e.g., "novel-romance")
     genre_lower = genre.lower()
     genre_instruction = genre_specific.get(genre_lower, "")
-    
+
     # If no specific instruction found and it's a novel sub-genre, try general novel
     if not genre_instruction and genre_lower.startswith("novel-"):
         genre_instruction = genre_specific.get("novel", "")
-    
-    return base_instructions + "\n" + genre_instruction + "\nFinal Delivery Style: Your storytelling voice should feel immersive, warm, expressive, rhythmic, cinematic, and deeply human. Every sentence should sound like it belongs in a captivating audiobook or podcast episode."
+
+    return (
+        base_instructions
+        + "\n"
+        + genre_instruction
+        + "\nFinal Delivery Style: Your storytelling voice should feel immersive, warm, expressive, rhythmic, cinematic, and deeply human. Every sentence should sound like it belongs in a captivating audiobook or podcast episode."
+    )
 
 
 class OpenAIService:
     """Service for OpenAI API integration (TTS + Whisper STT)."""
 
     def __init__(self, voice: str, max_tokens_per_chunk: int = 900):
-        
-        api_key = settings.OPENAI_API_KEY 
-        
+        api_key = settings.OPENAI_API_KEY
+
         # Debug: Log what we're getting (masked for security)
-        logger.info(f"Loading API key from settings. Length: {len(api_key) if api_key else 0}")
+        logger.info(
+            f"Loading API key from settings. Length: {len(api_key) if api_key else 0}"
+        )
         if api_key:
-            masked_key = api_key[:7] + "..." + api_key[-4:] if len(api_key) > 11 else "***"
+            masked_key = (
+                api_key[:7] + "..." + api_key[-4:] if len(api_key) > 11 else "***"
+            )
             logger.info(f"API key (masked): {masked_key}")
-        
+
         # Check if API key is missing or invalid
         if not api_key:
             raise ValueError(
                 "OpenAI API key not configured. "
                 "Please set OPENAI_API_KEY in your .env file or environment variables."
             )
-        
+
         # Check if API key starts with "sk-" (required format)
         if not api_key.startswith("sk-"):
             raise ValueError(
@@ -457,26 +542,33 @@ class OpenAIService:
                 f"Current value (first 10 chars): {api_key[:10] if len(api_key) >= 10 else api_key}. "
                 f"Please check your OPENAI_API_KEY in .env file."
             )
-        
+
         # Check for placeholder values
         placeholder_values = ["sk-...", "sk-", "your-api-key-here", "OPENAI_API_KEY"]
-        if api_key.lower() in [p.lower() for p in placeholder_values] or len(api_key) < 20:
+        if (
+            api_key.lower() in [p.lower() for p in placeholder_values]
+            or len(api_key) < 20
+        ):
             raise ValueError(
                 f"OpenAI API key appears to be a placeholder or too short (length: {len(api_key)}). "
                 f"Current value (first 10 chars): {api_key[:10] if len(api_key) >= 10 else api_key}. "
                 f"Please set a valid OPENAI_API_KEY in your .env file. "
                 f"You can find your API key at https://platform.openai.com/account/api-keys"
             )
-        
+
         self.client = OpenAI(api_key=api_key)
         self.voice = voice
-        self.max_tokens_per_chunk = max(400, min(max_tokens_per_chunk, 1500))  # safety bounds
-        logger.info(f"OpenAIService initialized (Voice: {self.voice}, Max tokens/chunk: {self.max_tokens_per_chunk})")
+        self.max_tokens_per_chunk = max(
+            400, min(max_tokens_per_chunk, 1500)
+        )  # safety bounds
+        logger.info(
+            f"OpenAIService initialized (Voice: {self.voice}, Max tokens/chunk: {self.max_tokens_per_chunk})"
+        )
 
     def _estimate_tokens(self, text: str) -> int:
         """Estimate token count (roughly 1 token = 4 characters for English)."""
         return len(text) // 4
-    
+
     def _split_text_into_chunks(self, text: str, max_tokens: int = 900) -> List[str]:
         """
         Split text into chunks that fit within token limit.
@@ -485,9 +577,9 @@ class OpenAIService:
         estimated_tokens = self._estimate_tokens(text)
         if estimated_tokens <= max_tokens:
             return [text]
-        
+
         chunks = []
-        sentences = re.split(r'([.!?]\s+)', text)
+        sentences = re.split(r"([.!?]\s+)", text)
         current_chunk = ""
 
         def flush_current():
@@ -497,7 +589,9 @@ class OpenAIService:
                 current_chunk = ""
 
         for i in range(0, len(sentences), 2):
-            sentence = sentences[i] + (sentences[i+1] if i+1 < len(sentences) else "")
+            sentence = sentences[i] + (
+                sentences[i + 1] if i + 1 < len(sentences) else ""
+            )
             sentence_tokens = self._estimate_tokens(sentence)
 
             # If single sentence is larger than max_tokens, split by words
@@ -508,23 +602,35 @@ class OpenAIService:
                     test_sentence = (temp_sentence + " " + word).strip()
                     if self._estimate_tokens(test_sentence) > max_tokens:
                         if temp_sentence:
-                            if self._estimate_tokens(current_chunk + " " + temp_sentence) > max_tokens:
+                            if (
+                                self._estimate_tokens(
+                                    current_chunk + " " + temp_sentence
+                                )
+                                > max_tokens
+                            ):
                                 flush_current()
                                 current_chunk = temp_sentence
                             else:
-                                current_chunk = (current_chunk + " " + temp_sentence).strip()
+                                current_chunk = (
+                                    current_chunk + " " + temp_sentence
+                                ).strip()
                         temp_sentence = word
                     else:
                         temp_sentence = test_sentence
                 if temp_sentence:
-                    if self._estimate_tokens(current_chunk + " " + temp_sentence) > max_tokens:
+                    if (
+                        self._estimate_tokens(current_chunk + " " + temp_sentence)
+                        > max_tokens
+                    ):
                         flush_current()
                         current_chunk = temp_sentence
                     else:
                         current_chunk = (current_chunk + " " + temp_sentence).strip()
                 continue
 
-            test_chunk = (current_chunk + " " + sentence).strip() if current_chunk else sentence
+            test_chunk = (
+                (current_chunk + " " + sentence).strip() if current_chunk else sentence
+            )
             if self._estimate_tokens(test_chunk) > max_tokens and current_chunk:
                 flush_current()
                 current_chunk = sentence.strip()
@@ -532,20 +638,16 @@ class OpenAIService:
                 current_chunk = test_chunk.strip()
 
         flush_current()
-        
+
         return chunks
 
     def generate_audio_with_timestamps(
-        self, 
-        text: str, 
-        output_dir: Path,
-        job_id: str,
-        genre: str = "general"
+        self, text: str, output_dir: Path, job_id: str, genre: str = "general"
     ) -> Tuple[Path, Path]:
         """
         Generate audio with timestamps using genre-specific voice instructions.
         Handles text chunking if input exceeds token limit.
-        
+
         Args:
             text: Text to convert to speech
             output_dir: Directory to save output files
@@ -553,9 +655,9 @@ class OpenAIService:
             genre: Book genre (e.g., "novel", "self-help", etc.)
         """
         logger.info(f"Job {job_id}: Starting OpenAI 2-Call Pipeline...")
-        
+
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Define output paths
         audio_path = output_dir / f"{job_id}_raw_audio.mp3"
         timestamps_path = output_dir / f"{job_id}_timestamps.json"
@@ -563,12 +665,12 @@ class OpenAIService:
         # Get genre-specific voice instructions
         instructions = get_voice_instructions_for_genre(genre)
         logger.info(f"Using voice instructions for genre: {genre}")
-        
+
         try:
             # Check if text needs to be chunked
             instructions_tokens = self._estimate_tokens(instructions)
             safe_limit = 1900  # Leave ~100 tokens for metadata/overhead
-            
+
             # If instructions themselves exceed the limit, truncate them
             max_instruction_tokens = 1500  # Max tokens for instructions
             if instructions_tokens > max_instruction_tokens:
@@ -580,10 +682,9 @@ class OpenAIService:
                 max_instruction_chars = max_instruction_tokens * 4  # Rough estimate
                 instructions = instructions[:max_instruction_chars]
                 instructions_tokens = self._estimate_tokens(instructions)
-            
+
             dynamic_max_tokens = min(
-                self.max_tokens_per_chunk,
-                max(200, safe_limit - instructions_tokens)
+                self.max_tokens_per_chunk, max(200, safe_limit - instructions_tokens)
             )
             if dynamic_max_tokens < 200:
                 logger.warning(
@@ -596,29 +697,37 @@ class OpenAIService:
                 logger.info(
                     "Adjusting chunk size to %s tokens to account for instruction length (%s tokens).",
                     dynamic_max_tokens,
-                    instructions_tokens
+                    instructions_tokens,
                 )
 
             chunks = self._split_text_into_chunks(text, max_tokens=dynamic_max_tokens)
-            
+
             if len(chunks) > 1:
-                logger.info(f"Job {job_id}: Text exceeds token limit, splitting into {len(chunks)} chunks...")
-                return self._process_chunked_text(chunks, instructions, audio_path, timestamps_path, job_id)
+                logger.info(
+                    f"Job {job_id}: Text exceeds token limit, splitting into {len(chunks)} chunks..."
+                )
+                return self._process_chunked_text(
+                    chunks, instructions, audio_path, timestamps_path, job_id
+                )
             else:
                 # Single chunk - process normally
-                return self._process_single_chunk(text, instructions, audio_path, timestamps_path, job_id)
-        
+                return self._process_single_chunk(
+                    text, instructions, audio_path, timestamps_path, job_id
+                )
+
         except Exception as e:
-            logger.error(f"Job {job_id}: Error in OpenAI 2-Call Pipeline!", exc_info=True)
+            logger.error(
+                f"Job {job_id}: Error in OpenAI 2-Call Pipeline!", exc_info=True
+            )
             raise
-    
+
     def _process_single_chunk(
-        self, 
-        text: str, 
-        instructions: str, 
-        audio_path: Path, 
+        self,
+        text: str,
+        instructions: str,
+        audio_path: Path,
         timestamps_path: Path,
-        job_id: str
+        job_id: str,
     ) -> Tuple[Path, Path]:
         """Process a single text chunk."""
         # --- Call 1: Generate Audio (TTS) ---
@@ -629,11 +738,11 @@ class OpenAIService:
             voice=self.voice,
             input=text,
             instructions=instructions,
-            response_format="mp3"
+            response_format="mp3",
         )
         response.stream_to_file(str(audio_path))
         logger.info(f"Job {job_id}: Raw audio saved to {audio_path}")
-        
+
         # --- Call 2: Generate Timestamps (Whisper STT) ---
         logger.info(f"Job {job_id}: Calling OpenAI Whisper API for timestamps...")
         with open(audio_path, "rb") as audio_file:
@@ -641,166 +750,209 @@ class OpenAIService:
                 model="whisper-1",
                 file=audio_file,
                 response_format="verbose_json",
-                timestamp_granularities=["word", "segment"]
+                timestamp_granularities=["word", "segment"],
             )
-        
+
         timestamps_data = transcription.model_dump()
-        
+        # logger.info(f"Job {job_id}: Timestamps generated.")
+        # timestamps_data = restore_punctuation(timestamps_data)
+        # logger.info(f"Job {job_id}: Punctuation restored in timestamps data.")
+
         with open(timestamps_path, "w", encoding="utf-8") as f:
             json.dump(timestamps_data, f, indent=2, ensure_ascii=False)
-            
+
         logger.info(f"Job {job_id}: Timestamps saved to {timestamps_path}")
-        
+
         return audio_path, timestamps_path
-    
+
     def _process_chunked_text(
         self,
         chunks: List[str],
         instructions: str,
         audio_path: Path,
         timestamps_path: Path,
-        job_id: str
+        job_id: str,
     ) -> Tuple[Path, Path]:
         """Process multiple text chunks and combine results."""
         import subprocess
-        
+
         chunk_audio_files = []
         all_words = []
         all_segments = []
+        all_chunk_texts = []  # Store punctuated text from each chunk
         total_duration = 0.0
-        
+
         # Process each chunk
         for i, chunk in enumerate(chunks):
-            logger.info(f"Job {job_id}: Processing chunk {i+1}/{len(chunks)}...")
+            logger.info(f"Job {job_id}: Processing chunk {i + 1}/{len(chunks)}...")
             chunk_audio_raw = audio_path.parent / f"{audio_path.stem}_chunk_{i}_raw.mp3"
             chunk_audio = audio_path.parent / f"{audio_path.stem}_chunk_{i}.mp3"
-            
+
             # Generate audio for chunk
-            logger.info(f"Job {job_id}: Generating audio chunk {i+1}/{len(chunks)} using OpenAI voice: {self.voice}")
+            logger.info(
+                f"Job {job_id}: Generating audio chunk {i + 1}/{len(chunks)} using OpenAI voice: {self.voice}"
+            )
             response = self.client.audio.speech.create(
                 model="gpt-4o-mini-tts",
                 voice=self.voice,
                 input=chunk,
                 instructions=instructions,
-                response_format="mp3"
+                response_format="mp3",
             )
             response.stream_to_file(str(chunk_audio_raw))
-            
+
             # Normalize and clean each chunk before concatenation
             # This prevents static noise from level mismatches
-            logger.debug(f"Job {job_id}: Processing chunk {i+1} audio - removing static and normalizing...")
+            logger.debug(
+                f"Job {job_id}: Processing chunk {i + 1} audio - removing static and normalizing..."
+            )
             ffmpeg_path = self._get_ffmpeg_path()
             normalize_cmd = [
                 ffmpeg_path,
                 "-y",
-                "-i", str(chunk_audio_raw),
-                "-af", "highpass=f=100,lowpass=f=15000,anlmdn=s=0.0001",  # Remove low-freq static, light denoise
-                "-ar", "44100",
-                "-ac", "1",
-                "-b:a", "192k",
-                str(chunk_audio)
+                "-i",
+                str(chunk_audio_raw),
+                "-af",
+                "highpass=f=100,lowpass=f=15000,anlmdn=s=0.0001",  # Remove low-freq static, light denoise
+                "-ar",
+                "44100",
+                "-ac",
+                "1",
+                "-b:a",
+                "192k",
+                str(chunk_audio),
             ]
             subprocess.run(normalize_cmd, check=True, capture_output=True, text=True)
-            logger.debug(f"Job {job_id}: Chunk {i+1} audio processed (static removal and normalization applied)")
-            
+            logger.debug(
+                f"Job {job_id}: Chunk {i + 1} audio processed (static removal and normalization applied)"
+            )
+
             # Clean up raw chunk
             if chunk_audio_raw.exists():
                 chunk_audio_raw.unlink()
-            
+
             chunk_audio_files.append(chunk_audio)
-            
+
             # Get timestamps for chunk
             with open(chunk_audio, "rb") as audio_file:
                 transcription = self.client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
                     response_format="verbose_json",
-                    timestamp_granularities=["word", "segment"]
+                    timestamp_granularities=["word", "segment"],
                 )
-            
+
             chunk_data = transcription.model_dump()
-            
+            # logger.info(
+            #     f"Job {job_id}: Timestamps generated for chunk {i + 1}/{len(chunks)}"
+            # )
+            # chunk_data = restore_punctuation(chunk_data)
+            # logger.info(
+            #     f"Job {job_id}: Punctuation restored in chunk {i + 1} timestamps data."
+            # )
+
+            # Save the punctuated text from this chunk (Whisper returns it with punctuation)
+            if "text" in chunk_data:
+                all_chunk_texts.append(chunk_data["text"])
+
             # Adjust timestamps with offset
             if "words" in chunk_data:
                 for word in chunk_data["words"]:
                     word["start"] += total_duration
                     word["end"] += total_duration
                 all_words.extend(chunk_data["words"])
-            
+
             if "segments" in chunk_data:
                 for segment in chunk_data["segments"]:
                     segment["start"] += total_duration
                     segment["end"] += total_duration
                 all_segments.extend(chunk_data["segments"])
-            
+
             # Update total duration
             if chunk_data.get("duration"):
                 total_duration += chunk_data["duration"]
             elif all_segments:
                 total_duration = all_segments[-1]["end"]
-        
+
         # Combine audio files using ffmpeg
         logger.info(f"Job {job_id}: Combining {len(chunk_audio_files)} audio chunks...")
         ffmpeg_path = self._get_ffmpeg_path()
-        
+
         # Create concat file for ffmpeg
         concat_file = audio_path.parent / "concat_list.txt"
         with open(concat_file, "w") as f:
             for chunk_file in chunk_audio_files:
                 f.write(f"file '{chunk_file.absolute()}'\n")
-        
+
         # Concatenate audio files with normalization and smooth transitions
         # Normalize all chunks to same level and re-encode for smooth boundaries
         cmd = [
             ffmpeg_path,
             "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_file),
-            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11,highpass=f=100",  # Normalize and remove low-freq static
-            "-c:a", "libmp3lame",
-            "-b:a", "192k",
-            "-ar", "44100",
-            "-ac", "1",
-            str(audio_path)
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-af",
+            "loudnorm=I=-16:TP=-1.5:LRA=11,highpass=f=100",  # Normalize and remove low-freq static
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            str(audio_path),
         ]
-        
+
         subprocess.run(cmd, check=True, capture_output=True, text=True)
-        
+
         # Clean up chunk files and concat file
         for chunk_file in chunk_audio_files:
             if chunk_file.exists():
                 chunk_file.unlink()
         if concat_file.exists():
             concat_file.unlink()
-        
+
         # Save combined timestamps
         combined_data = {
-            "text": " ".join(chunks),
-            "language": chunk_data.get("language", "en"),
+            "text": " ".join(
+                all_chunk_texts
+            ),  # Use punctuated text from Whisper, not original chunks
+            "language": all_segments[0].get("language", "en")
+            if all_segments
+            else "en",  # Get language from first segment
             "duration": total_duration,
             "words": all_words,
-            "segments": all_segments
+            "segments": all_segments,
         }
-        
+
+        logging.info("Adding punctuation to combined timestamps data...")
+        combined_data = restore_punctuation(combined_data)
+        logging.info("Punctuation restored in combined timestamps data.")
         with open(timestamps_path, "w", encoding="utf-8") as f:
             json.dump(combined_data, f, indent=2, ensure_ascii=False)
-        
+
         logger.info(f"Job {job_id}: Combined audio and timestamps saved")
-        
+
         return audio_path, timestamps_path
-    
+
     def _get_ffmpeg_path(self) -> str:
         """Get the path to ffmpeg executable."""
         import shutil
+
         try:
             import imageio_ffmpeg
+
             return imageio_ffmpeg.get_ffmpeg_exe()
         except ImportError:
             pass
-        
+
         ffmpeg_path = shutil.which("ffmpeg")
         if ffmpeg_path:
             return ffmpeg_path
-        
+
         raise FileNotFoundError("FFmpeg not found. Please install ffmpeg.")
