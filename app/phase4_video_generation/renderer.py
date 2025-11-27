@@ -174,7 +174,7 @@ class FrameGeneratorMerged:
                 # 3. Constraint: Only 4 lines per slide max for reels
                 self.max_lines = 4
                 # 4. Left alignment for reels (matching renderer.py)
-                self.text_align = "center"
+                self.text_align = "left"
                 logger.info(
                     f"Reels config: margins=({self.margin_x}, {self.margin_y}), font={self.font_size}, lines={self.max_lines}"
                 )
@@ -185,7 +185,7 @@ class FrameGeneratorMerged:
                 self.margin_y = int(self.bg_height * 0.10)
                 self.font_size = font_size if font_size else int(self.bg_height / 8)
                 self.max_lines = 4
-                self.text_align = "center"
+                self.text_align = "left"
         else:
             # LAPTOP/LANDSCAPE MODE (Main video generation)
             self.margin_x = int(self.bg_width * MARGIN_PERCENT_X)
